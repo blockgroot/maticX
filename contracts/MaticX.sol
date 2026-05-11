@@ -30,6 +30,25 @@ contract MaticX is
 	uint256 private constant BASIS_POINTS = 10_000;
 	uint256 private constant NOT_ENTERED = 1;
 	uint256 private constant ENTERED = 2;
+	uint256 private constant FROZEN_RATE_PRECISION = 1e18;
+	uint256 private constant MAX_BALANCE_REDEEM_DELAY = 7 days;
+
+	// ---- Drain-and-hold sunset: custom errors -----------------------------
+	error DepositsAlreadyPaused();
+	error DepositsAlreadyUnpaused();
+	error DrainAlreadyComplete();
+	error DrainNotComplete();
+	error ActiveStakeRemains();
+	error NoDrainedPOL();
+	error ZeroSupply();
+	error DelayTooLong();
+	error EmptyValidatorIds();
+	error NoUnbondNonce(uint256 validatorId);
+	error RequestDoesNotExist();
+	error RequestNotUnlocked();
+	error AmountInPolZero();
+	error DrainedPolUnderflow();
+	error DepositsPausedError();
 
 	IValidatorRegistry private validatorRegistry;
 	IStakeManager private stakeManager;
@@ -45,6 +64,17 @@ contract MaticX is
 	IERC20Upgradeable private polToken;
 	uint256 private reentrancyGuardStatus;
 
+	// ---- Drain-and-hold sunset: storage (append-only) ---------------------
+
+	bool public override depositsPaused;
+	bool public override drainComplete;
+	uint256 public override drainedPolBalance;
+	uint256 public override frozenRate;
+	uint256 public override balanceModeRedeemDelay;
+	mapping(address => BalanceWithdrawalRequest[]) private balanceWithdrawalRequests;
+	mapping(uint256 => uint256) private drainUnbondNonces;
+	uint256[42] private __gap_sunset;
+
 	/// ------------------------------ Modifiers -------------------------------
 
 	/// @notice Enables guard from reentrant calls.
@@ -56,6 +86,18 @@ contract MaticX is
 		reentrancyGuardStatus = ENTERED;
 		_;
 		reentrancyGuardStatus = NOT_ENTERED;
+	}
+
+	/// @notice Blocks calls while deposits are granularly paused.
+	modifier whenDepositsNotPaused() {
+		if (depositsPaused) revert DepositsPausedError();
+		_;
+	}
+
+	/// @notice Blocks reward and migration paths once the drain is complete.
+	modifier whenNotDrainComplete() {
+		if (drainComplete) revert DrainAlreadyComplete();
+		_;
 	}
 
 	/// -------------------------- Initializers --------------------------------
@@ -142,7 +184,14 @@ contract MaticX is
 	/// @return Amount of minted MaticX shares
 	function submit(
 		uint256 _amount
-	) external override nonReentrant whenNotPaused returns (uint256) {
+	)
+		external
+		override
+		nonReentrant
+		whenNotPaused
+		whenDepositsNotPaused
+		returns (uint256)
+	{
 		return _submit(msg.sender, _amount, false);
 	}
 
@@ -153,7 +202,14 @@ contract MaticX is
 	/// @return Amount of minted MaticX shares
 	function submitPOL(
 		uint256 _amount
-	) external override nonReentrant whenNotPaused returns (uint256) {
+	)
+		external
+		override
+		nonReentrant
+		whenNotPaused
+		whenDepositsNotPaused
+		returns (uint256)
+	{
 		return _submit(msg.sender, _amount, true);
 	}
 
@@ -203,12 +259,24 @@ contract MaticX is
 	}
 
 	/// @notice Registers a user's request to withdraw an amount of POL tokens.
-	/// @param _amount - Amount of POL tokens
+	/// Operates in one of two modes:
+	///   * Pre-drain: legacy validator-routed unstake.
+	///   * Post-drain: balance-mode. Burns MaticX, decrements drainedPolBalance
+	///     by amount * frozenRate, and creates a BalanceWithdrawalRequest.
+	/// Between bulkUnstakeAllValidators and markDrainComplete, legacy calls
+	/// revert naturally because there is no active validator stake to satisfy
+	/// the withdrawal — the tx reverts atomically (the burn is undone).
+	/// @param _amount - Amount of MaticX shares
 	// slither-disable-next-line reentrancy-no-eth
 	function requestWithdraw(
 		uint256 _amount
 	) external override nonReentrant whenNotPaused {
 		require(_amount > 0, "Invalid amount");
+
+		if (drainComplete) {
+			_requestBalanceWithdrawal(msg.sender, _amount);
+			return;
+		}
 
 		(
 			uint256 amountToWithdraw,
@@ -280,6 +348,38 @@ contract MaticX is
 		emit RequestWithdraw(msg.sender, _amount, amountToWithdraw);
 	}
 
+	/// @dev Post-drain balance-mode redemption. Burns MaticX, decrements the
+	/// drained POL balance by the frozen-rate equivalent, and records a request
+	/// the user can later claim.
+	function _requestBalanceWithdrawal(
+		address _user,
+		uint256 _amountInMaticX
+	) private {
+		uint256 amountInPol = (_amountInMaticX * frozenRate) /
+			FROZEN_RATE_PRECISION;
+		if (amountInPol == 0) revert AmountInPolZero();
+		if (drainedPolBalance < amountInPol) revert DrainedPolUnderflow();
+
+		_burn(_user, _amountInMaticX);
+		drainedPolBalance -= amountInPol;
+
+		uint256 unlockTimestamp = block.timestamp + balanceModeRedeemDelay;
+		BalanceWithdrawalRequest[]
+			storage userRequests = balanceWithdrawalRequests[_user];
+		uint256 idx = userRequests.length;
+		userRequests.push(
+			BalanceWithdrawalRequest(amountInPol, unlockTimestamp)
+		);
+
+		emit RequestBalanceWithdrawal(
+			_user,
+			idx,
+			_amountInMaticX,
+			amountInPol,
+			unlockTimestamp
+		);
+	}
+
 	/// @dev Returns the starting validator index for a user's withdrawal request.
 	/// @param validatorIds - Array of validator ids
 	/// @return Starting validator index
@@ -349,7 +449,14 @@ contract MaticX is
 	/// @param _validatorId - Validator id to withdraw Matic rewards
 	function withdrawRewards(
 		uint256 _validatorId
-	) external override nonReentrant whenNotPaused returns (uint256) {
+	)
+		external
+		override
+		nonReentrant
+		whenNotPaused
+		whenNotDrainComplete
+		returns (uint256)
+	{
 		return _withdrawRewards(_validatorId);
 	}
 
@@ -357,7 +464,14 @@ contract MaticX is
 	/// @param _validatorIds - Array of validator ids
 	function withdrawValidatorsReward(
 		uint256[] calldata _validatorIds
-	) external override nonReentrant whenNotPaused returns (uint256[] memory) {
+	)
+		external
+		override
+		nonReentrant
+		whenNotPaused
+		whenNotDrainComplete
+		returns (uint256[] memory)
+	{
 		uint256 validatorIdCount = _validatorIds.length;
 		uint256[] memory rewards = new uint256[](validatorIdCount);
 
@@ -392,7 +506,14 @@ contract MaticX is
 	/// @param _validatorId - Validator id to stake POL rewards
 	function stakeRewardsAndDistributeFees(
 		uint256 _validatorId
-	) external override nonReentrant whenNotPaused onlyRole(BOT) {
+	)
+		external
+		override
+		nonReentrant
+		whenNotPaused
+		whenNotDrainComplete
+		onlyRole(BOT)
+	{
 		_stakeRewardsAndDistributeFees(_validatorId, true, true);
 	}
 
@@ -401,7 +522,14 @@ contract MaticX is
 	/// @param _validatorId - Validator id to stake Matic rewards
 	function stakeRewardsAndDistributeFeesMatic(
 		uint256 _validatorId
-	) external override nonReentrant whenNotPaused onlyRole(BOT) {
+	)
+		external
+		override
+		nonReentrant
+		whenNotPaused
+		whenNotDrainComplete
+		onlyRole(BOT)
+	{
 		_stakeRewardsAndDistributeFees(_validatorId, false, true);
 	}
 
@@ -414,6 +542,15 @@ contract MaticX is
 		bool _pol,
 		bool _revertOnZeroReward
 	) private {
+		// Defense-in-depth: never harvest the drain-backing POL as rewards.
+		// Public callers are also guarded by whenNotDrainComplete, but
+		// setFeePercent iterates this private fn internally so we early-return
+		// here as well.
+		if (drainComplete) {
+			if (_revertOnZeroReward) revert DrainAlreadyComplete();
+			return;
+		}
+
 		require(
 			validatorRegistry.validatorIdExists(_validatorId),
 			"Doesn't exist in validator registry"
@@ -461,7 +598,13 @@ contract MaticX is
 		uint256 _fromValidatorId,
 		uint256 _toValidatorId,
 		uint256 _amount
-	) external override whenNotPaused onlyRole(DEFAULT_ADMIN_ROLE) {
+	)
+		external
+		override
+		whenNotPaused
+		whenNotDrainComplete
+		onlyRole(DEFAULT_ADMIN_ROLE)
+	{
 		require(_amount > 0, "Amount is zero");
 		require(
 			validatorRegistry.validatorIdExists(_fromValidatorId),
@@ -567,8 +710,172 @@ contract MaticX is
 	}
 
 	/// @notice Toggles the paused status of this contract.
+	/// @custom:deprecated Never call this on mainnet during or after the
+	/// sunset flow. The OZ Pausable pause path blocks claim functions and
+	/// would prevent users from redeeming. Use pauseDeposits() instead.
 	function togglePause() external override onlyRole(DEFAULT_ADMIN_ROLE) {
 		paused() ? _unpause() : _pause();
+	}
+
+	/// -------------------- Sunset / drain-and-hold admin ---------------------
+
+	/// @notice Granularly pauses new deposits (mints).
+	function pauseDeposits()
+		external
+		override
+		onlyRole(DEFAULT_ADMIN_ROLE)
+	{
+		if (depositsPaused) revert DepositsAlreadyPaused();
+		depositsPaused = true;
+		emit DepositsPaused();
+	}
+
+	/// @notice Granularly unpauses new deposits.
+	function unpauseDeposits()
+		external
+		override
+		onlyRole(DEFAULT_ADMIN_ROLE)
+	{
+		if (!depositsPaused) revert DepositsAlreadyUnpaused();
+		depositsPaused = false;
+		emit DepositsUnpaused();
+	}
+
+	/// @notice Sells the remaining active stake on every registered validator.
+	/// Each call records the unbond nonce produced by the validator share so
+	/// bulkClaimDrainedStake() can later claim without needing off-chain state.
+	/// Validators with zero active stake are skipped.
+	function bulkUnstakeAllValidators()
+		external
+		override
+		nonReentrant
+		onlyRole(DEFAULT_ADMIN_ROLE)
+	{
+		if (drainComplete) revert DrainAlreadyComplete();
+
+		uint256[] memory validatorIds = validatorRegistry.getValidators();
+		uint256 validatorIdCount = validatorIds.length;
+
+		for (uint256 i = 0; i < validatorIdCount; ) {
+			uint256 validatorId = validatorIds[i];
+			IValidatorShare validatorShare = IValidatorShare(
+				stakeManager.getValidatorContract(validatorId)
+			);
+			(uint256 activeStake, ) = getTotalStake(validatorShare);
+
+			if (activeStake > 0) {
+				validatorShare.sellVoucher_newPOL(
+					activeStake,
+					type(uint256).max
+				);
+				uint256 nonce = validatorShare.unbondNonces(address(this));
+				drainUnbondNonces[validatorId] = nonce;
+				emit BulkUnstakeInitiated(validatorId, nonce, activeStake);
+			}
+
+			unchecked {
+				++i;
+			}
+		}
+	}
+
+	/// @notice Claims previously initiated bulk-unstake unbonds for the given
+	/// validators. Accumulates the received POL into drainedPolBalance.
+	/// @param _validatorIds - Validator ids whose unbonds should be claimed
+	function bulkClaimDrainedStake(
+		uint256[] calldata _validatorIds
+	) external override nonReentrant onlyRole(DEFAULT_ADMIN_ROLE) {
+		if (drainComplete) revert DrainAlreadyComplete();
+
+		uint256 validatorIdCount = _validatorIds.length;
+		if (validatorIdCount == 0) revert EmptyValidatorIds();
+
+		for (uint256 i = 0; i < validatorIdCount; ) {
+			uint256 validatorId = _validatorIds[i];
+			uint256 nonce = drainUnbondNonces[validatorId];
+			if (nonce == 0) revert NoUnbondNonce(validatorId);
+
+			address validatorShare = stakeManager.getValidatorContract(
+				validatorId
+			);
+
+			uint256 balanceBefore = polToken.balanceOf(address(this));
+			IValidatorShare(validatorShare).unstakeClaimTokens_newPOL(nonce);
+			uint256 claimed = polToken.balanceOf(address(this)) - balanceBefore;
+
+			drainedPolBalance += claimed;
+			delete drainUnbondNonces[validatorId];
+
+			emit BulkClaimCompleted(validatorId, nonce, claimed);
+
+			unchecked {
+				++i;
+			}
+		}
+	}
+
+	/// @notice Marks the drain as complete, captures the frozen exchange rate
+	/// and pushes the final state snapshot to L2. Reverts if any active stake
+	/// remains across the registered validators, ensuring drainedPolBalance
+	/// fully backs totalSupply.
+	function markDrainComplete()
+		external
+		override
+		nonReentrant
+		onlyRole(DEFAULT_ADMIN_ROLE)
+	{
+		if (drainComplete) revert DrainAlreadyComplete();
+		if (getTotalStakeAcrossAllValidators() != 0)
+			revert ActiveStakeRemains();
+		if (drainedPolBalance == 0) revert NoDrainedPOL();
+
+		uint256 supply = totalSupply();
+		if (supply == 0) revert ZeroSupply();
+
+		frozenRate = (drainedPolBalance * FROZEN_RATE_PRECISION) / supply;
+		drainComplete = true;
+
+		fxStateRootTunnel.sendMessageToChild(
+			abi.encode(supply, drainedPolBalance)
+		);
+
+		emit DrainCompleted(drainedPolBalance, supply, frozenRate);
+	}
+
+	/// @notice Sets the delay applied to balance-mode withdrawals.
+	/// @param _delay - Delay in seconds (max 7 days)
+	function setBalanceModeRedeemDelay(
+		uint256 _delay
+	) external override onlyRole(DEFAULT_ADMIN_ROLE) {
+		if (_delay > MAX_BALANCE_REDEEM_DELAY) revert DelayTooLong();
+		uint256 oldDelay = balanceModeRedeemDelay;
+		balanceModeRedeemDelay = _delay;
+		emit BalanceModeRedeemDelaySet(oldDelay, _delay);
+	}
+
+	/// -------------------- Sunset / drain-and-hold user ----------------------
+
+	/// @notice Claims a previously requested balance-mode withdrawal.
+	/// @param _idx - Index of the user's balance-mode request
+	function claimBalanceWithdrawal(
+		uint256 _idx
+	) external override nonReentrant whenNotPaused {
+		if (!drainComplete) revert DrainNotComplete();
+
+		BalanceWithdrawalRequest[]
+			storage userRequests = balanceWithdrawalRequests[msg.sender];
+		if (_idx >= userRequests.length) revert RequestDoesNotExist();
+
+		BalanceWithdrawalRequest memory request = userRequests[_idx];
+		if (block.timestamp < request.unlockTimestamp)
+			revert RequestNotUnlocked();
+
+		userRequests[_idx] = userRequests[userRequests.length - 1];
+		userRequests.pop();
+
+		polToken.safeTransfer(msg.sender, request.amountInPol);
+
+		emit ClaimBalanceWithdrawal(msg.sender, _idx, request.amountInPol);
 	}
 
 	/// ------------------------------ Getters ---------------------------------
@@ -607,7 +914,9 @@ contract MaticX is
 		uint256 totalShares = totalSupply();
 		totalShares = totalShares == 0 ? 1 : totalShares;
 
-		uint256 totalPooledAmount = getTotalStakeAcrossAllValidators();
+		uint256 totalPooledAmount = drainComplete
+			? drainedPolBalance
+			: getTotalStakeAcrossAllValidators();
 		if (totalPooledAmount == 0) {
 			totalPooledAmount = 1;
 		}
@@ -694,7 +1003,27 @@ contract MaticX is
 	/// @custom:deprecated
 	/// @return Total pooled POL tokens
 	function getTotalPooledMatic() external view override returns (uint256) {
-		return getTotalStakeAcrossAllValidators();
+		return
+			drainComplete
+				? drainedPolBalance
+				: getTotalStakeAcrossAllValidators();
+	}
+
+	/// @notice Returns the user's balance-mode withdrawal requests.
+	/// @param _user - User address
+	function getBalanceWithdrawalRequests(
+		address _user
+	) external view override returns (BalanceWithdrawalRequest[] memory) {
+		return balanceWithdrawalRequests[_user];
+	}
+
+	/// @notice Returns the stored unbond nonce produced by the bulk unstake for
+	/// a given validator id (zero if none / already claimed).
+	/// @param _validatorId - Validator id
+	function getDrainUnbondNonce(
+		uint256 _validatorId
+	) external view override returns (uint256) {
+		return drainUnbondNonces[_validatorId];
 	}
 
 	/// @notice Returns the total amount of staked POL tokens and their exchange

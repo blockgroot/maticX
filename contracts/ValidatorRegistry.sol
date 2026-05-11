@@ -8,6 +8,7 @@ import { StringsUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/St
 import { IStakeManager } from "./interfaces/IStakeManager.sol";
 import { IValidatorShare } from "./interfaces/IValidatorShare.sol";
 import { IValidatorRegistry } from "./interfaces/IValidatorRegistry.sol";
+import { IMaticX } from "./interfaces/IMaticX.sol";
 
 /// @title ValidatorRegistry contract
 /// @notice ValidatorRegistry is the main contract that manages validators.
@@ -30,6 +31,9 @@ contract ValidatorRegistry is
 	mapping(uint256 => bool) public override validatorIdExists;
 	uint256[] private validators;
 	address private polToken;
+
+	// ---- Drain-and-hold sunset: storage (append-only) ---------------------
+	uint256[49] private __gap_sunset;
 
 	/// ------------------------------ Modifiers -------------------------------
 
@@ -158,14 +162,22 @@ contract ValidatorRegistry is
 		validatoIdIsZero(_validatorId)
 		whenValidatorIdExists(_validatorId)
 	{
-		require(
-			preferredDepositValidatorId != _validatorId,
-			"Can't remove a preferred validator for deposits"
-		);
-		require(
-			preferredWithdrawalValidatorId != _validatorId,
-			"Can't remove a preferred validator for withdrawals"
-		);
+		// Skip the preferred-id guard once both ids have been cleared. This
+		// only happens post-drain via clearPreferredValidators(), so the
+		// guard remains in force during normal operation.
+		if (
+			preferredDepositValidatorId != 0 ||
+			preferredWithdrawalValidatorId != 0
+		) {
+			require(
+				preferredDepositValidatorId != _validatorId,
+				"Can't remove a preferred validator for deposits"
+			);
+			require(
+				preferredWithdrawalValidatorId != _validatorId,
+				"Can't remove a preferred validator for withdrawals"
+			);
+		}
 
 		if (!_ignoreBalance) {
 			address validatorShare = stakeManager.getValidatorContract(
@@ -239,6 +251,22 @@ contract ValidatorRegistry is
 		maticX = _maticX;
 
 		emit SetMaticX(_maticX);
+	}
+
+	/// @notice Zeros both preferred validator ids. Gated on the MaticX drain
+	/// being marked complete. After this call, removeValidator() can drop the
+	/// remaining validators because the preferred-id guard is skipped when
+	/// both ids are zero.
+	function clearPreferredValidators()
+		external
+		override
+		onlyRole(DEFAULT_ADMIN_ROLE)
+	{
+		require(maticX != address(0), "Zero MaticX address");
+		require(IMaticX(maticX).drainComplete(), "Drain not complete");
+		preferredDepositValidatorId = 0;
+		preferredWithdrawalValidatorId = 0;
+		emit ClearPreferredValidators();
 	}
 
 	/// @notice Sets a new version of this contract
