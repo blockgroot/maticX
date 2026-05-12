@@ -59,7 +59,6 @@ contract MaticX is
 	uint256 public frozenRate;
 	uint256 public drainCompleteTimestamp;
 	mapping(address => uint256[]) public drainUnbondNonces;
-	uint256[43] private __gap_sunset;
 
 	/// ---------------------- Sunset errors -----------------------------------
 	error DrainAlreadyComplete();
@@ -83,7 +82,7 @@ contract MaticX is
 		uint256 supplyAtFreeze,
 		uint256 frozenRate
 	);
-	event FrozenRatePushedToL2(uint256 frozenRate);
+	event FrozenRatePushedToL2(uint256 supplyAtPush, uint256 drainedPolBalance);
 	event InstantRedeemToggled(address indexed by, bool enabled);
 	event InstantClaimed(
 		address indexed user,
@@ -547,6 +546,7 @@ contract MaticX is
 	/// validator. Per-validator auto-claim rewards land in this contract and
 	/// are captured later by `claimAndFreeze`. Reverts after `drainComplete`.
 	function bulkUnstakeAllValidators() external onlyRole(DEFAULT_ADMIN_ROLE) {
+		require(paused(), "Pause first");
 		if (drainComplete) revert DrainAlreadyComplete();
 
 		uint256[] memory validatorIds = validatorRegistry.getValidators();
@@ -562,7 +562,10 @@ contract MaticX is
 				uint256 nonce = IValidatorShare(vs).unbondNonces(
 					address(this)
 				) + 1;
-				IValidatorShare(vs).sellVoucher_newPOL(stake, stake);
+				IValidatorShare(vs).sellVoucher_newPOL(
+					stake,
+					type(uint256).max
+				);
 				drainUnbondNonces[vs].push(nonce);
 				emit DrainUnbondInitiated(vs, nonce, stake);
 			}
@@ -578,6 +581,7 @@ contract MaticX is
 	/// txn can be retried if some unbonds are not yet matured. Precondition:
 	/// admin waited full unbond period after `bulkUnstakeAllValidators`.
 	function claimDrainNonces() external onlyRole(DEFAULT_ADMIN_ROLE) {
+		require(paused(), "Pause first");
 		if (drainComplete) revert DrainAlreadyComplete();
 
 		uint256[] memory validatorIds = validatorRegistry.getValidators();
@@ -610,6 +614,7 @@ contract MaticX is
 	/// Dust remaining in validators is forfeit (not user funds — frozen rate
 	/// is computed from POL balance only).
 	function freezeExchangeRate() external onlyRole(DEFAULT_ADMIN_ROLE) {
+		require(paused(), "Pause first");
 		if (drainComplete) revert DrainAlreadyComplete();
 
 		uint256 polBalance = polToken.balanceOf(address(this));
@@ -629,10 +634,11 @@ contract MaticX is
 	/// a single push after freeze is sufficient.
 	function pushFrozenRateToL2() external onlyRole(DEFAULT_ADMIN_ROLE) {
 		if (!drainComplete) revert DrainNotComplete();
+		uint256 supply = totalSupply();
 		fxStateRootTunnel.sendMessageToChild(
-			abi.encode(totalSupply(), drainedPolBalance)
+			abi.encode(supply, drainedPolBalance)
 		);
-		emit FrozenRatePushedToL2(frozenRate);
+		emit FrozenRatePushedToL2(supply, drainedPolBalance);
 	}
 
 	/// @notice Enables or disables user-facing instant redemption. Requires
@@ -673,7 +679,7 @@ contract MaticX is
 	/// @param _custody - Address to receive the swept tokens
 	function sweepToCustody(
 		address _custody
-	) external onlyRole(DEFAULT_ADMIN_ROLE) {
+	) external nonReentrant onlyRole(DEFAULT_ADMIN_ROLE) {
 		if (!drainComplete) revert DrainNotComplete();
 		if (block.timestamp < drainCompleteTimestamp + CUSTODY_DELAY) {
 			revert CustodyDelayNotElapsed();
