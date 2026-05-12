@@ -65,9 +65,11 @@ There is intentionally **no `__gap_sunset`** (removed in `ad62685`). The contrac
 
 ### Prerequisites
 
-The sunset suite forks Ethereum mainnet against the real MaticX proxy. It
-needs an **archival** RPC endpoint — public endpoints (publicnode, llamarpc)
-will fail with "historical state … is not available" because they prune.
+The sunset suite forks Ethereum mainnet against the real MaticX proxy. By
+default it uses the configured `ETHEREUM_API_KEY` and `FORKING_BLOCK_NUMBER`,
+which requires an **archival** RPC endpoint. For a latest-state fork, set
+`MAINNET_RPC_URL`; public endpoints such as `https://eth.drpc.org` can be used
+because the suite will not request historical state.
 
 `.env` must contain a real `ETHEREUM_API_KEY`. Copy from the example if not present:
 
@@ -76,7 +78,7 @@ cp .env.example .env
 $EDITOR .env  # set ETHEREUM_API_KEY to a real Alchemy/Infura/Ankr key
 ```
 
-Optional override: set `MAINNET_RPC_URL` to point at any archival HTTPS endpoint (private node, third-party archival). When this is set, the suite pins the fork to `latest` instead of `FORKING_BLOCK_NUMBER`, so an archival key is still required.
+Optional override: set `MAINNET_RPC_URL` to point at any HTTPS endpoint. When this is set, the suite pins the fork to `latest` instead of `FORKING_BLOCK_NUMBER`.
 
 ### Running
 
@@ -89,6 +91,9 @@ npx solhint 'contracts/**/*.sol'
 
 # Sunset suite only (fast)
 npx hardhat test test/Sunset.ts
+
+# Sunset suite with readable test names
+MOCHA_REPORTER=spec MAINNET_RPC_URL="https://eth.drpc.org" npx hardhat test test/Sunset.ts
 
 # Full suite
 npx hardhat test
@@ -156,9 +161,17 @@ npx hardhat tenderly:edge-cases --network tenderly
 - **Access control** — non-admin reverts on every admin function.
 - **Pre-sunset `claimWithdrawal` during sunset** — user with a matured pre-sunset withdrawal can still claim after pause+freeze, and `drainedPolBalance` is unaffected.
 
-### Two tests intentionally `this.skip()` when math doesn't allow
+### Deterministic defensive-branch tests
 
-`AmountInPolZero` and `InsufficientDrainedBalance` need the frozen rate to be either `< 1e18` or for someone to over-mint MATICx post-freeze. In a fresh fixture both conditions are unreachable (rate ≈ 1e18, pause blocks mints). The tests stay in the suite as forward guards — they trigger if math or invariants change.
+`AmountInPolZero` and `InsufficientDrainedBalance` are defensive branches that
+normal fork accounting may not reach. The suite now patches the relevant sunset
+storage slots after freeze, verifies each public getter changed, and then
+asserts the revert. Current expected result:
+
+```text
+27 passing
+0 pending
+```
 
 ---
 

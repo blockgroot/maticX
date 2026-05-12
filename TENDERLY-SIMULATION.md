@@ -289,8 +289,8 @@ in `test/Sunset.ts` against a local hardhat fork (no quota). Specifically:
   - Kill-switch flow (enable → disable → instantClaim reverts)
   - Random EOA against the full admin function surface
   - `instantClaim(0)` → `ZeroAmount`
-  - Dust amount → `AmountInPolZero` (when `frozenRate < 1e18`)
-  - Over-claim → `InsufficientDrainedBalance` (defensive — math makes it unreachable normally)
+  - Dust amount → `AmountInPolZero` (forced by lowering `frozenRate` in local fork storage)
+  - Over-claim → `InsufficientDrainedBalance` (forced by lowering `drainedPolBalance` in local fork storage)
   - `claimDrainNonces` before unbond matures (catches the inner revert)
   - `pushFrozenRateToL2` before freeze → `DrainNotComplete`
 - **Storage layout safety** via OZ's `validateUpgrade` (skipped on Tenderly because `forceImport` mis-registers).
