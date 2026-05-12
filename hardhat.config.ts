@@ -102,6 +102,7 @@ const config: HardhatUserConfig = {
 			accounts,
 			gasPrice,
 		},
+	},
 	defaultNetwork: Network.Hardhat,
 	solidity: {
 		compilers: [
