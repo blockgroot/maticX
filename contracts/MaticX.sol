@@ -64,7 +64,6 @@ contract MaticX is
 	/// ---------------------- Sunset errors -----------------------------------
 	error DrainAlreadyComplete();
 	error DrainNotComplete();
-	error ActiveStakeRemains();
 	error EmptyContract();
 	error InsufficientDrainedBalance();
 	error AmountInPolZero();
@@ -575,9 +574,10 @@ contract MaticX is
 	}
 
 	/// @notice Claims all pending unbond nonces, migrates any legacy MATIC
-	/// balance to POL, and freezes the MATICx -> POL exchange rate using the
-	/// full POL balance of this contract. Single shot — irreversible.
-	function claimAndFreeze() external onlyRole(DEFAULT_ADMIN_ROLE) {
+	/// balance to POL. Idempotent: pops nonces only on successful claim so the
+	/// txn can be retried if some unbonds are not yet matured. Precondition:
+	/// admin waited full unbond period after `bulkUnstakeAllValidators`.
+	function claimDrainNonces() external onlyRole(DEFAULT_ADMIN_ROLE) {
 		if (drainComplete) revert DrainAlreadyComplete();
 
 		uint256[] memory validatorIds = validatorRegistry.getValidators();
@@ -585,14 +585,11 @@ contract MaticX is
 
 		for (uint256 i = 0; i < validatorCount; ) {
 			address vs = stakeManager.getValidatorContract(validatorIds[i]);
-			uint256[] memory nonces = drainUnbondNonces[vs];
-			uint256 nonceCount = nonces.length;
-
-			for (uint256 j = 0; j < nonceCount; ) {
-				IValidatorShare(vs).unstakeClaimTokens_newPOL(nonces[j]);
-				unchecked {
-					++j;
-				}
+			uint256[] storage nonces = drainUnbondNonces[vs];
+			while (nonces.length > 0) {
+				uint256 nonce = nonces[nonces.length - 1];
+				nonces.pop();
+				IValidatorShare(vs).unstakeClaimTokens_newPOL(nonce);
 			}
 
 			unchecked {
@@ -600,15 +597,20 @@ contract MaticX is
 			}
 		}
 
-		if (getTotalStakeAcrossAllValidators() != 0) {
-			revert ActiveStakeRemains();
-		}
-
 		uint256 maticBal = maticToken.balanceOf(address(this));
 		if (maticBal > 0) {
 			maticToken.safeApprove(POLYGON_MIGRATION, maticBal);
 			IPolygonMigration(POLYGON_MIGRATION).migrate(maticBal);
 		}
+	}
+
+	/// @notice Freezes the MATICx -> POL exchange rate using current POL
+	/// balance. Single shot — irreversible. Precondition: admin ran
+	/// `claimDrainNonces` and verified all drain unbonds claimed off-chain.
+	/// Dust remaining in validators is forfeit (not user funds — frozen rate
+	/// is computed from POL balance only).
+	function freezeExchangeRate() external onlyRole(DEFAULT_ADMIN_ROLE) {
+		if (drainComplete) revert DrainAlreadyComplete();
 
 		uint256 polBalance = polToken.balanceOf(address(this));
 		uint256 supply = totalSupply();
