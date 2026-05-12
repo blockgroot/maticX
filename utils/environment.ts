@@ -109,7 +109,9 @@ export function extractEnvironmentVariables(): EnvironmentSchema {
 		})
 		.validate(process.env);
 	if (error) {
-		throw new Error(error.annotate());
+		// Avoid `error.annotate()` — it dumps the full env (incl. secrets).
+		const keys = error.details.map((d) => d.path.join(".")).join(", ");
+		throw new Error(`Invalid environment variables: ${keys}`);
 	}
 	return envVars;
 }
