@@ -12,6 +12,7 @@ import "./import-contract";
 import "./initialize-v2-matic-x";
 import "./initialize-v2-validator-registry";
 import "./sunset";
+import "./sunset-tenderly";
 import "./upgrade-contract";
 import "./validate-child-deployment";
 import "./validate-parent-deployment";
