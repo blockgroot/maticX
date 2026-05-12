@@ -11,7 +11,6 @@ import { IValidatorShare } from "./interfaces/IValidatorShare.sol";
 import { IValidatorRegistry } from "./interfaces/IValidatorRegistry.sol";
 import { IStakeManager } from "./interfaces/IStakeManager.sol";
 import { IFxStateRootTunnel } from "./interfaces/IFxStateRootTunnel.sol";
-import { IPolygonMigration } from "./interfaces/IPolygonMigration.sol";
 import { IMaticX } from "./interfaces/IMaticX.sol";
 
 /// @title MaticX contract
@@ -35,8 +34,6 @@ contract MaticX is
 
 	uint256 public constant FROZEN_RATE_PRECISION = 1e18;
 	uint256 public constant CUSTODY_DELAY = 3 * 365 days;
-	address public constant POLYGON_MIGRATION =
-		0x29e7DF7b6A1B2b07b731457f499E1696c60E2C4e;
 
 	IValidatorRegistry private validatorRegistry;
 	IStakeManager private stakeManager;
@@ -576,10 +573,12 @@ contract MaticX is
 		}
 	}
 
-	/// @notice Claims all pending unbond nonces, migrates any legacy MATIC
-	/// balance to POL. Idempotent: pops nonces only on successful claim so the
-	/// txn can be retried if some unbonds are not yet matured. Precondition:
-	/// admin waited full unbond period after `bulkUnstakeAllValidators`.
+	/// @notice Claims all pending unbond nonces accumulated during
+	/// `bulkUnstakeAllValidators`. Idempotent: pops nonces only on successful
+	/// claim so the txn can be retried if some unbonds are not yet matured.
+	/// Precondition: admin waited full unbond period after
+	/// `bulkUnstakeAllValidators`. Any residual non-POL token (e.g. legacy
+	/// MATIC dust) is swept raw via `sweepToCustody` after `CUSTODY_DELAY`.
 	function claimDrainNonces() external onlyRole(DEFAULT_ADMIN_ROLE) {
 		require(paused(), "Pause first");
 		if (drainComplete) revert DrainAlreadyComplete();
@@ -599,12 +598,6 @@ contract MaticX is
 			unchecked {
 				++i;
 			}
-		}
-
-		uint256 maticBal = maticToken.balanceOf(address(this));
-		if (maticBal > 0) {
-			maticToken.safeApprove(POLYGON_MIGRATION, maticBal);
-			IPolygonMigration(POLYGON_MIGRATION).migrate(maticBal);
 		}
 	}
 
