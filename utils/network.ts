@@ -13,7 +13,6 @@ export enum Network {
 	Ethereum = "ethereum",
 	EthereumAlt = "mainnet",
 	Polygon = "polygon",
-	Tenderly = "tenderly",
 }
 
 export function getProviderUrl(

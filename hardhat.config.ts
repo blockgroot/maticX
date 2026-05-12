@@ -102,17 +102,6 @@ const config: HardhatUserConfig = {
 			accounts,
 			gasPrice,
 		},
-		// Tenderly Virtual TestNet — only configured when TENDERLY_RPC_URL is set.
-		// Falls back to a placeholder url so missing env doesn't break hardhat loading.
-		[Network.Tenderly]: {
-			url:
-				process.env.TENDERLY_RPC_URL ||
-				"https://virtual.mainnet.rpc.tenderly.co/UNSET",
-			chainId: Number(process.env.TENDERLY_CHAIN_ID ?? 73571),
-			from: envVars.DEPLOYER_ADDRESS,
-			accounts,
-		},
-	},
 	defaultNetwork: Network.Hardhat,
 	solidity: {
 		compilers: [
