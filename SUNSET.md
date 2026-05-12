@@ -61,7 +61,7 @@ There is intentionally **no `__gap_sunset`** (removed in `ad62685`). The contrac
 | File              | Purpose                                                                          |
 | ----------------- | -------------------------------------------------------------------------------- |
 | `test/Sunset.ts`  | Sunset suite — end-to-end, negative cases, pause-state matrix, access control.    |
-| `test/MaticX.ts`  | Existing suite (one test updated for the new pause-free `claimWithdrawal`).       |
+| `test/MaticX.ts`  | Existing pre-sunset suite (one test updated for the new pause-free `claimWithdrawal`). |
 
 ### Prerequisites
 
