@@ -1,8 +1,10 @@
 import { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
 import {
+	getStorageAt,
 	loadFixture,
 	reset,
 	setBalance,
+	setStorageAt,
 	time,
 } from "@nomicfoundation/hardhat-network-helpers";
 import { expect } from "chai";
@@ -176,6 +178,29 @@ describe("MaticX sunset", function () {
 		await advanceUnbond(stakeManager, stakeManagerGovernance);
 		await (maticX.connect(manager) as MaticX).claimDrainNonces();
 		await (maticX.connect(manager) as MaticX).freezeExchangeRate();
+	}
+
+	async function findScalarStorageSlot(
+		address: string,
+		expectedValue: bigint,
+		readValue: () => Promise<bigint>,
+		probeValue: bigint,
+		maxSlots = 1000
+	): Promise<number> {
+		const target = ethers.toBeHex(expectedValue, 32).toLowerCase();
+		for (let slot = 0; slot < maxSlots; slot++) {
+			const value = (await getStorageAt(address, slot)).toLowerCase();
+			if (value !== target) continue;
+
+			await setStorageAt(address, slot, probeValue);
+			const observed = await readValue();
+			await setStorageAt(address, slot, expectedValue);
+
+			if (observed === probeValue) return slot;
+		}
+		throw new Error(
+			`Could not find storage slot for ${expectedValue.toString()}`
+		);
 	}
 
 	describe("End-to-end happy path", function () {
@@ -513,56 +538,47 @@ describe("MaticX sunset", function () {
 
 		it("reverts AmountInPolZero on dust amount that rounds to zero POL", async function () {
 			const fx = await loadFixture(deployFixture);
-			const { maticX, stakerA } = fx;
+			const { maticX, maticXAddress, stakerA } = fx;
 			await freezeAndEnable(fx);
 
-			// frozenRate is ~1e18. Dust amount = 1 wei MATICx.
-			// amountInPol = 1 * frozenRate / 1e18. If frozenRate < 1e18, this is 0.
-			const rate = await maticX.frozenRate();
-			if (rate < FROZEN_RATE_PRECISION) {
-				await expect(
-					(maticX.connect(stakerA) as MaticX).instantClaim(1)
-				).to.be.revertedWithCustomError(maticX, "AmountInPolZero");
-			} else {
-				// rate >= 1e18, dust = 1 wei still maps to >= 1 wei POL — skip
-				this.skip();
-			}
+			// The live fork rate can be >= 1e18, making non-zero dust claims
+			// payable. Force a tiny frozen rate so the defensive branch is
+			// exercised deterministically.
+			const rateSlot = await findScalarStorageSlot(
+				maticXAddress,
+				await maticX.frozenRate(),
+				() => maticX.frozenRate(),
+				123456789n
+			);
+			await setStorageAt(maticXAddress, rateSlot, 1n);
+			expect(await maticX.frozenRate()).to.equal(1n);
+
+			await expect(
+				(maticX.connect(stakerA) as MaticX).instantClaim(1)
+			).to.be.revertedWithCustomError(maticX, "AmountInPolZero");
 		});
 
 		it("reverts InsufficientDrainedBalance when amount exceeds pool", async function () {
 			const fx = await loadFixture(deployFixture);
-			const { maticX, manager, stakerA, stakerB } = fx;
+			const { maticX, maticXAddress, stakerA } = fx;
 			await freezeAndEnable(fx);
 
-			// Total supply held by stakerA + stakerB. Try to redeem more than entire pool.
-			const drained = await maticX.drainedPolBalance();
-			const rate = await maticX.frozenRate();
-			// Mint extra to attacker via admin? Not possible. Instead, transfer all to stakerA.
-			const balB = await maticX.balanceOf(stakerB.address);
-			await (maticX.connect(stakerB) as MaticX).transfer(
-				stakerA.address,
-				balB
+			// Normal accounting makes over-claim unreachable. Force the stored
+			// pool lower after freeze to exercise the defensive guard.
+			const drainedSlot = await findScalarStorageSlot(
+				maticXAddress,
+				await maticX.drainedPolBalance(),
+				() => maticX.drainedPolBalance(),
+				123456789n
 			);
+			await setStorageAt(maticXAddress, drainedSlot, 0n);
+			expect(await maticX.drainedPolBalance()).to.equal(0n);
 
-			// Even with full supply, claim should map exactly to drained — try one extra wei
-			const fullSupply = await maticX.balanceOf(stakerA.address);
-			const wouldPay =
-				(fullSupply * rate) / FROZEN_RATE_PRECISION;
-			if (wouldPay > drained) {
-				await expect(
-					(maticX.connect(stakerA) as MaticX).instantClaim(
-						fullSupply
-					)
-				).to.be.revertedWithCustomError(
-					maticX,
-					"InsufficientDrainedBalance"
-				);
-			} else {
-				// Drained covers full supply — bump by 1 wei of POL via accounting trick is not trivial.
-				// Skip if math doesn't allow over-claim.
-				void manager;
-				this.skip();
-			}
+			await expect(
+				(maticX.connect(stakerA) as MaticX).instantClaim(
+					await maticX.balanceOf(stakerA.address)
+				)
+			).to.be.revertedWithCustomError(maticX, "InsufficientDrainedBalance");
 		});
 
 		it("burns shares, decrements drainedPolBalance, and transfers POL", async function () {
