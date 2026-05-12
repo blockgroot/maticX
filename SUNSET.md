@@ -94,6 +94,52 @@ npx hardhat test test/Sunset.ts
 npx hardhat test
 ```
 
+### Tenderly rehearsal runs
+
+Use a fresh Tenderly Virtual TestNet Admin RPC for each run if quota is tight.
+Set `TENDERLY_SKIP_PUSH_L2=1` when you want to save one Tenderly operation.
+
+```bash
+# Run 1: upgrade through Phase 3 user instant-claim, no final sweep.
+export TENDERLY_RPC_URL="<tenderly-admin-rpc>"
+export TENDERLY_CHAIN_ID=9991
+export TENDERLY_SKIP_PUSH_L2=1
+
+npx hardhat tenderly:snapshot --network tenderly
+npx hardhat tenderly:upgrade --network tenderly
+npx hardhat tenderly:pre-sunset-request --network tenderly \
+  --holder 0xf8A12d1c8aDF1295Ade12CA69B22687dc0E0e752
+npx hardhat tenderly:run-sunset --network tenderly
+npx hardhat tenderly:pre-sunset-claim --network tenderly
+npx hardhat tenderly:user-claim --network tenderly \
+  --holder 0xf8A12d1c8aDF1295Ade12CA69B22687dc0E0e752 \
+  --mode full
+```
+
+```bash
+# Run 2: lean core sunset plus final custody sweep.
+export TENDERLY_RPC_URL="<tenderly-admin-rpc>"
+export TENDERLY_CHAIN_ID=9991
+export TENDERLY_SKIP_PUSH_L2=1
+
+npx hardhat tenderly:snapshot --network tenderly
+npx hardhat tenderly:upgrade --network tenderly
+npx hardhat tenderly:run-sunset --network tenderly
+npx hardhat tenderly:sweep --network tenderly \
+  --custody 0x80A43dd35382C4919991C5Bca7f46Dd24Fde4C67
+```
+
+```bash
+# Run 3: Tenderly negative-path smoke tests.
+# Must run on a fresh post-upgrade vNet before tenderly:run-sunset.
+export TENDERLY_RPC_URL="<tenderly-admin-rpc>"
+export TENDERLY_CHAIN_ID=9991
+
+npx hardhat tenderly:snapshot --network tenderly
+npx hardhat tenderly:upgrade --network tenderly
+npx hardhat tenderly:edge-cases --network tenderly
+```
+
 ### What the sunset suite covers
 
 - **End-to-end happy path** — pause → bulk-unstake → claim-drain → freeze → push-L2 → enable → instant-claim → sweep. Asserts state at every step including math correctness of the frozen rate and POL transferred.
