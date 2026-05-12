@@ -11,11 +11,13 @@ import { IValidatorShare } from "./interfaces/IValidatorShare.sol";
 import { IValidatorRegistry } from "./interfaces/IValidatorRegistry.sol";
 import { IStakeManager } from "./interfaces/IStakeManager.sol";
 import { IFxStateRootTunnel } from "./interfaces/IFxStateRootTunnel.sol";
+import { IPolygonMigration } from "./interfaces/IPolygonMigration.sol";
 import { IMaticX } from "./interfaces/IMaticX.sol";
 
 /// @title MaticX contract
 /// @notice MaticX is the main contract that manages staking and unstaking of
 /// POL tokens for users.
+// solhint-disable-next-line max-states-count
 contract MaticX is
 	IMaticX,
 	ERC20Upgradeable,
@@ -31,6 +33,11 @@ contract MaticX is
 	uint256 private constant NOT_ENTERED = 1;
 	uint256 private constant ENTERED = 2;
 
+	uint256 public constant FROZEN_RATE_PRECISION = 1e18;
+	uint256 public constant CUSTODY_DELAY = 3 * 365 days;
+	address public constant POLYGON_MIGRATION =
+		0x29e7DF7b6A1B2b07b731457f499E1696c60E2C4e;
+
 	IValidatorRegistry private validatorRegistry;
 	IStakeManager private stakeManager;
 	IERC20Upgradeable private maticToken;
@@ -44,6 +51,51 @@ contract MaticX is
 	IFxStateRootTunnel public override fxStateRootTunnel;
 	IERC20Upgradeable private polToken;
 	uint256 private reentrancyGuardStatus;
+
+	/// ---------------------- Sunset storage (v3) -----------------------------
+	bool public drainComplete;
+	bool public instantRedeemEnabled;
+	uint256 public drainedPolBalance;
+	uint256 public frozenRate;
+	uint256 public drainCompleteTimestamp;
+	mapping(address => uint256[]) public drainUnbondNonces;
+	uint256[43] private __gap_sunset;
+
+	/// ---------------------- Sunset errors -----------------------------------
+	error DrainAlreadyComplete();
+	error DrainNotComplete();
+	error ActiveStakeRemains();
+	error EmptyContract();
+	error InsufficientDrainedBalance();
+	error AmountInPolZero();
+	error CustodyDelayNotElapsed();
+	error ZeroAddress();
+	error ZeroAmount();
+	error InstantRedeemNotEnabled();
+
+	/// ---------------------- Sunset events -----------------------------------
+	event DrainUnbondInitiated(
+		address indexed validatorShare,
+		uint256 nonce,
+		uint256 stake
+	);
+	event DrainCompleted(
+		uint256 polBalance,
+		uint256 supplyAtFreeze,
+		uint256 frozenRate
+	);
+	event FrozenRatePushedToL2(uint256 frozenRate);
+	event InstantRedeemToggled(address indexed by, bool enabled);
+	event InstantClaimed(
+		address indexed user,
+		uint256 amountInMaticX,
+		uint256 amountInPol
+	);
+	event SweptToCustody(
+		address indexed custody,
+		uint256 polAmount,
+		uint256 maticAmount
+	);
 
 	/// ------------------------------ Modifiers -------------------------------
 
@@ -305,11 +357,10 @@ contract MaticX is
 	}
 
 	/// @notice Claims POL tokens from a validator share and sends them to the
-	/// user.
+	/// user. Intentionally not gated by `whenNotPaused` so that users can
+	/// always claim previously-initiated withdrawals during sunset.
 	/// @param _idx - Array index of the user's withdrawal request
-	function claimWithdrawal(
-		uint256 _idx
-	) external override nonReentrant whenNotPaused {
+	function claimWithdrawal(uint256 _idx) external override nonReentrant {
 		WithdrawalRequest[] storage userRequests = userWithdrawalRequests[
 			msg.sender
 		];
@@ -491,6 +542,152 @@ contract MaticX is
 		);
 	}
 
+	/// ------------------------------ Sunset ----------------------------------
+
+	/// @notice Unstakes the contract's full stake from every registered
+	/// validator. Per-validator auto-claim rewards land in this contract and
+	/// are captured later by `claimAndFreeze`. Reverts after `drainComplete`.
+	function bulkUnstakeAllValidators() external onlyRole(DEFAULT_ADMIN_ROLE) {
+		if (drainComplete) revert DrainAlreadyComplete();
+
+		uint256[] memory validatorIds = validatorRegistry.getValidators();
+		uint256 validatorCount = validatorIds.length;
+
+		for (uint256 i = 0; i < validatorCount; ) {
+			address vs = stakeManager.getValidatorContract(validatorIds[i]);
+			(uint256 stake, ) = IValidatorShare(vs).getTotalStake(
+				address(this)
+			);
+
+			if (stake > 0) {
+				uint256 nonce = IValidatorShare(vs).unbondNonces(
+					address(this)
+				) + 1;
+				IValidatorShare(vs).sellVoucher_newPOL(stake, stake);
+				drainUnbondNonces[vs].push(nonce);
+				emit DrainUnbondInitiated(vs, nonce, stake);
+			}
+
+			unchecked {
+				++i;
+			}
+		}
+	}
+
+	/// @notice Claims all pending unbond nonces, migrates any legacy MATIC
+	/// balance to POL, and freezes the MATICx -> POL exchange rate using the
+	/// full POL balance of this contract. Single shot — irreversible.
+	function claimAndFreeze() external onlyRole(DEFAULT_ADMIN_ROLE) {
+		if (drainComplete) revert DrainAlreadyComplete();
+
+		uint256[] memory validatorIds = validatorRegistry.getValidators();
+		uint256 validatorCount = validatorIds.length;
+
+		for (uint256 i = 0; i < validatorCount; ) {
+			address vs = stakeManager.getValidatorContract(validatorIds[i]);
+			uint256[] memory nonces = drainUnbondNonces[vs];
+			uint256 nonceCount = nonces.length;
+
+			for (uint256 j = 0; j < nonceCount; ) {
+				IValidatorShare(vs).unstakeClaimTokens_newPOL(nonces[j]);
+				unchecked {
+					++j;
+				}
+			}
+
+			unchecked {
+				++i;
+			}
+		}
+
+		if (getTotalStakeAcrossAllValidators() != 0) {
+			revert ActiveStakeRemains();
+		}
+
+		uint256 maticBal = maticToken.balanceOf(address(this));
+		if (maticBal > 0) {
+			maticToken.safeApprove(POLYGON_MIGRATION, maticBal);
+			IPolygonMigration(POLYGON_MIGRATION).migrate(maticBal);
+		}
+
+		uint256 polBalance = polToken.balanceOf(address(this));
+		uint256 supply = totalSupply();
+		if (polBalance == 0 || supply == 0) revert EmptyContract();
+
+		frozenRate = (polBalance * FROZEN_RATE_PRECISION) / supply;
+		drainedPolBalance = polBalance;
+		drainComplete = true;
+		drainCompleteTimestamp = block.timestamp;
+
+		emit DrainCompleted(polBalance, supply, frozenRate);
+	}
+
+	/// @notice Pushes the post-freeze (totalSupply, drainedPolBalance) pair to
+	/// the L2 ChildPool. Idempotent: ratio stays correct across L1 burns, so
+	/// a single push after freeze is sufficient.
+	function pushFrozenRateToL2() external onlyRole(DEFAULT_ADMIN_ROLE) {
+		if (!drainComplete) revert DrainNotComplete();
+		fxStateRootTunnel.sendMessageToChild(
+			abi.encode(totalSupply(), drainedPolBalance)
+		);
+		emit FrozenRatePushedToL2(frozenRate);
+	}
+
+	/// @notice Enables or disables user-facing instant redemption. Requires
+	/// `drainComplete` before enabling. Also acts as an emergency kill-switch.
+	/// @param _enabled - Whether instant redemption is enabled
+	function setInstantRedeemEnabled(
+		bool _enabled
+	) external onlyRole(DEFAULT_ADMIN_ROLE) {
+		if (_enabled && !drainComplete) revert DrainNotComplete();
+		instantRedeemEnabled = _enabled;
+		emit InstantRedeemToggled(msg.sender, _enabled);
+	}
+
+	/// @notice Burns MATICx shares and sends the user POL at the frozen rate.
+	/// Intentionally not gated by `whenNotPaused`.
+	/// @param _amountInMaticX - Amount of MATICx shares to burn
+	function instantClaim(uint256 _amountInMaticX) external nonReentrant {
+		if (!instantRedeemEnabled) revert InstantRedeemNotEnabled();
+		if (_amountInMaticX == 0) revert ZeroAmount();
+
+		uint256 amountInPol = (_amountInMaticX * frozenRate) /
+			FROZEN_RATE_PRECISION;
+		if (amountInPol == 0) revert AmountInPolZero();
+		if (drainedPolBalance < amountInPol) {
+			revert InsufficientDrainedBalance();
+		}
+
+		_burn(msg.sender, _amountInMaticX);
+		drainedPolBalance -= amountInPol;
+		polToken.safeTransfer(msg.sender, amountInPol);
+
+		emit InstantClaimed(msg.sender, _amountInMaticX, amountInPol);
+	}
+
+	/// @notice After `CUSTODY_DELAY` elapses post-freeze, sweeps the full POL
+	/// and MATIC balance to the given custody address. Intended for
+	/// long-tail residue handover.
+	/// @param _custody - Address to receive the swept tokens
+	function sweepToCustody(
+		address _custody
+	) external onlyRole(DEFAULT_ADMIN_ROLE) {
+		if (!drainComplete) revert DrainNotComplete();
+		if (block.timestamp < drainCompleteTimestamp + CUSTODY_DELAY) {
+			revert CustodyDelayNotElapsed();
+		}
+		if (_custody == address(0)) revert ZeroAddress();
+
+		uint256 polBal = polToken.balanceOf(address(this));
+		uint256 maticBal = maticToken.balanceOf(address(this));
+		drainedPolBalance = 0;
+
+		if (polBal > 0) polToken.safeTransfer(_custody, polBal);
+		if (maticBal > 0) maticToken.safeTransfer(_custody, maticBal);
+
+		emit SweptToCustody(_custody, polBal, maticBal);
+	}
+
 	/// ------------------------------ Setters ---------------------------------
 
 	/// @notice Sets a fee percent where 1 = 0.01%.
@@ -498,7 +695,13 @@ contract MaticX is
 	// slither-disable-next-line reentrancy-eth
 	function setFeePercent(
 		uint16 _feePercent
-	) external override nonReentrant onlyRole(DEFAULT_ADMIN_ROLE) {
+	)
+		external
+		override
+		nonReentrant
+		whenNotPaused
+		onlyRole(DEFAULT_ADMIN_ROLE)
+	{
 		require(_feePercent <= MAX_FEE_PERCENT, "Fee percent is too high");
 
 		uint256[] memory validatorIds = validatorRegistry.getValidators();
