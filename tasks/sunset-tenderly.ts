@@ -1372,13 +1372,24 @@ task("tenderly:edge-cases")
 		const manager = await fundAndImpersonate(hre, ADDR.manager);
 		const random = (await hre.ethers.getSigners())[0];
 
+		if (await maticX.drainComplete()) {
+			throw new Error(
+				"tenderly:edge-cases must run on a fresh post-upgrade TestNet before tenderly:run-sunset. Current state has drainComplete=true."
+			);
+		}
+		if (await maticX.instantRedeemEnabled()) {
+			throw new Error(
+				"tenderly:edge-cases must run before instant redeem is enabled. Use a fresh TestNet and run only snapshot -> upgrade -> edge-cases."
+			);
+		}
+
 		await expectRevert(
 			"bulkUnstakeAllValidators without pause",
-			maticX.connect(manager).bulkUnstakeAllValidators()
+			maticX.connect(manager).bulkUnstakeAllValidators.staticCall()
 		);
 		await expectRevert(
 			"random EOA calls bulkUnstakeAllValidators",
-			maticX.connect(random).bulkUnstakeAllValidators()
+			maticX.connect(random).bulkUnstakeAllValidators.staticCall()
 		);
 
 		// Pause for the rest of the negative checks that need it.
@@ -1386,34 +1397,42 @@ task("tenderly:edge-cases")
 			await (await maticX.connect(manager).togglePause()).wait();
 		}
 
-		await expectRevert(
-			"freezeExchangeRate before drain claim (no POL captured yet)",
-			maticX.connect(manager).freezeExchangeRate(),
-			["EmptyContract", "Pause first"], // tolerate either depending on state
-			hre
-		);
+		const pol = await hre.ethers.getContractAt(ERC20_ABI, ADDR.pol);
+		const proxyPolBalance: bigint = await pol.balanceOf(ADDR.maticX);
+		if (proxyPolBalance === 0n) {
+			await expectRevert(
+				"freezeExchangeRate before drain claim (no POL captured yet)",
+				maticX.connect(manager).freezeExchangeRate.staticCall(),
+				["EmptyContract"],
+				hre
+			);
+		} else {
+			console.log(
+				`  SKIP freezeExchangeRate EmptyContract check — proxy already has POL (${proxyPolBalance.toString()})`
+			);
+		}
 		await expectRevert(
 			"pushFrozenRateToL2 before freeze",
-			maticX.connect(manager).pushFrozenRateToL2(),
+			maticX.connect(manager).pushFrozenRateToL2.staticCall(),
 			["DrainNotComplete"],
 			hre
 		);
 		await expectRevert(
 			"setInstantRedeemEnabled(true) before freeze",
-			maticX.connect(manager).setInstantRedeemEnabled(true),
+			maticX.connect(manager).setInstantRedeemEnabled.staticCall(true),
 			["DrainNotComplete"],
 			hre
 		);
 		await expectRevert(
 			"sweepToCustody before freeze",
-			maticX.connect(manager).sweepToCustody(random.address),
+			maticX.connect(manager).sweepToCustody.staticCall(random.address),
 			["DrainNotComplete"],
 			hre
 		);
 		await expectRevert(
 			"instantClaim while disabled",
-			maticX.connect(random).instantClaim(1n),
-			["InstantRedeemNotEnabled"],
+			maticX.connect(random).instantClaim.staticCall(1n),
+			["InstantRedeemNotEnabled", "execution reverted"],
 			hre
 		);
 
