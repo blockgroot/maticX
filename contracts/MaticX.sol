@@ -32,7 +32,7 @@ contract MaticX is
 	uint256 private constant NOT_ENTERED = 1;
 	uint256 private constant ENTERED = 2;
 
-	uint256 public constant FROZEN_RATE_PRECISION = 1e18;
+	uint256 public constant TERMINAL_RATE_PRECISION = 1e18;
 	uint256 public constant CUSTODY_DELAY = 3 * 365 days;
 
 	IValidatorRegistry private validatorRegistry;
@@ -50,37 +50,37 @@ contract MaticX is
 	uint256 private reentrancyGuardStatus;
 
 	/// ---------------------- Sunset storage (v3) -----------------------------
-	bool public drainComplete;
+	bool public assetRecallComplete;
 	bool public instantRedeemEnabled;
-	uint256 public drainedPolBalance;
-	uint256 public frozenRate;
-	uint256 public drainCompleteTimestamp;
-	mapping(address => uint256) public drainUnbondNonces;
+	uint256 public recalledPolBalance;
+	uint256 public terminalRate;
+	uint256 public assetRecallTimestamp;
+	mapping(address => uint256) public assetRecallNonces;
 
 	/// ---------------------- Sunset errors -----------------------------------
-	error DrainAlreadyComplete();
-	error DrainNotComplete();
+	error AssetRecallAlreadyComplete();
+	error AssetRecallNotComplete();
 	error EmptyContract();
-	error InsufficientDrainedBalance();
+	error InsufficientRecalledBalance();
 	error AmountInPolZero();
 	error CustodyDelayNotElapsed();
 	error ZeroAddress();
 	error ZeroAmount();
 	error InstantRedeemNotEnabled();
-	error ValidatorAlreadyDrained();
+	error ValidatorAlreadyRecalled();
 
 	/// ---------------------- Sunset events -----------------------------------
-	event DrainUnbondInitiated(
+	event AssetRecallInitiated(
 		address indexed validatorShare,
 		uint256 nonce,
 		uint256 stake
 	);
-	event DrainCompleted(
+	event AssetRecallCompleted(
 		uint256 polBalance,
 		uint256 supplyAtFreeze,
-		uint256 frozenRate
+		uint256 terminalRate
 	);
-	event FrozenRatePushedToL2(uint256 supplyAtPush, uint256 drainedPolBalance);
+	event TerminalRatePushedToL2(uint256 supplyAtPush, uint256 recalledPolBalance);
 	event InstantRedeemToggled(address indexed by, bool enabled);
 	event InstantClaimed(
 		address indexed user,
@@ -542,10 +542,10 @@ contract MaticX is
 
 	/// @notice Unstakes the contract's full stake from every registered
 	/// validator. Per-validator auto-claim rewards land in this contract and
-	/// are captured later by `claimAndFreeze`. Reverts after `drainComplete`.
+	/// are captured later by `claimAndFreeze`. Reverts after `assetRecallComplete`.
 	function bulkUnstakeAllValidators() external onlyRole(DEFAULT_ADMIN_ROLE) {
 		require(paused(), "Pause first");
-		if (drainComplete) revert DrainAlreadyComplete();
+		if (assetRecallComplete) revert AssetRecallAlreadyComplete();
 
 		uint256[] memory validatorIds = validatorRegistry.getValidators();
 		uint256 validatorCount = validatorIds.length;
@@ -557,8 +557,8 @@ contract MaticX is
 			);
 
 			if (stake > 0) {
-				if (drainUnbondNonces[vs] != 0) {
-					revert ValidatorAlreadyDrained();
+				if (assetRecallNonces[vs] != 0) {
+					revert ValidatorAlreadyRecalled();
 				}
 				uint256 nonce = IValidatorShare(vs).unbondNonces(
 					address(this)
@@ -567,8 +567,8 @@ contract MaticX is
 					stake,
 					type(uint256).max
 				);
-				drainUnbondNonces[vs] = nonce;
-				emit DrainUnbondInitiated(vs, nonce, stake);
+				assetRecallNonces[vs] = nonce;
+				emit AssetRecallInitiated(vs, nonce, stake);
 			}
 
 			unchecked {
@@ -583,18 +583,18 @@ contract MaticX is
 	/// Precondition: admin waited full unbond period after
 	/// `bulkUnstakeAllValidators`. Any residual non-POL token (e.g. legacy
 	/// MATIC dust) is swept raw via `sweepToCustody` after `CUSTODY_DELAY`.
-	function claimDrainNonces() external onlyRole(DEFAULT_ADMIN_ROLE) {
+	function claimAssetRecallNonces() external onlyRole(DEFAULT_ADMIN_ROLE) {
 		require(paused(), "Pause first");
-		if (drainComplete) revert DrainAlreadyComplete();
+		if (assetRecallComplete) revert AssetRecallAlreadyComplete();
 
 		uint256[] memory validatorIds = validatorRegistry.getValidators();
 		uint256 validatorCount = validatorIds.length;
 
 		for (uint256 i = 0; i < validatorCount; ) {
 			address vs = stakeManager.getValidatorContract(validatorIds[i]);
-			uint256 nonce = drainUnbondNonces[vs];
+			uint256 nonce = assetRecallNonces[vs];
 			if (nonce != 0) {
-				delete drainUnbondNonces[vs];
+				delete assetRecallNonces[vs];
 				IValidatorShare(vs).unstakeClaimTokens_newPOL(nonce);
 			}
 
@@ -606,64 +606,64 @@ contract MaticX is
 
 	/// @notice Freezes the MATICx -> POL exchange rate using current POL
 	/// balance. Single shot — irreversible. Precondition: admin ran
-	/// `claimDrainNonces` and verified all drain unbonds claimed off-chain.
-	/// Dust remaining in validators is forfeit (not user funds — frozen rate
+	/// `claimAssetRecallNonces` and verified all asset-recall unbonds claimed off-chain.
+	/// Dust remaining in validators is forfeit (not user funds — terminal rate
 	/// is computed from POL balance only).
-	function freezeExchangeRate() external onlyRole(DEFAULT_ADMIN_ROLE) {
+	function finalizeTerminalRate() external onlyRole(DEFAULT_ADMIN_ROLE) {
 		require(paused(), "Pause first");
-		if (drainComplete) revert DrainAlreadyComplete();
+		if (assetRecallComplete) revert AssetRecallAlreadyComplete();
 
 		uint256 polBalance = polToken.balanceOf(address(this));
 		uint256 supply = totalSupply();
 		if (polBalance == 0 || supply == 0) revert EmptyContract();
 
-		frozenRate = (polBalance * FROZEN_RATE_PRECISION) / supply;
-		drainedPolBalance = polBalance;
-		drainComplete = true;
-		drainCompleteTimestamp = block.timestamp;
+		terminalRate = (polBalance * TERMINAL_RATE_PRECISION) / supply;
+		recalledPolBalance = polBalance;
+		assetRecallComplete = true;
+		assetRecallTimestamp = block.timestamp;
 
-		emit DrainCompleted(polBalance, supply, frozenRate);
+		emit AssetRecallCompleted(polBalance, supply, terminalRate);
 	}
 
-	/// @notice Pushes the post-freeze (totalSupply, drainedPolBalance) pair to
+	/// @notice Pushes the post-freeze (totalSupply, recalledPolBalance) pair to
 	/// the L2 ChildPool. Idempotent: ratio stays correct across L1 burns, so
 	/// a single push after freeze is sufficient.
-	function pushFrozenRateToL2() external onlyRole(DEFAULT_ADMIN_ROLE) {
-		if (!drainComplete) revert DrainNotComplete();
+	function pushTerminalRateToL2() external onlyRole(DEFAULT_ADMIN_ROLE) {
+		if (!assetRecallComplete) revert AssetRecallNotComplete();
 		uint256 supply = totalSupply();
 		fxStateRootTunnel.sendMessageToChild(
-			abi.encode(supply, drainedPolBalance)
+			abi.encode(supply, recalledPolBalance)
 		);
-		emit FrozenRatePushedToL2(supply, drainedPolBalance);
+		emit TerminalRatePushedToL2(supply, recalledPolBalance);
 	}
 
 	/// @notice Enables or disables user-facing instant redemption. Requires
-	/// `drainComplete` before enabling. Also acts as an emergency kill-switch.
+	/// `assetRecallComplete` before enabling. Also acts as an emergency kill-switch.
 	/// @param _enabled - Whether instant redemption is enabled
 	function setInstantRedeemEnabled(
 		bool _enabled
 	) external onlyRole(DEFAULT_ADMIN_ROLE) {
-		if (_enabled && !drainComplete) revert DrainNotComplete();
+		if (_enabled && !assetRecallComplete) revert AssetRecallNotComplete();
 		instantRedeemEnabled = _enabled;
 		emit InstantRedeemToggled(msg.sender, _enabled);
 	}
 
-	/// @notice Burns MATICx shares and sends the user POL at the frozen rate.
+	/// @notice Burns MATICx shares and sends the user POL at the terminal rate.
 	/// Intentionally not gated by `whenNotPaused`.
 	/// @param _amountInMaticX - Amount of MATICx shares to burn
 	function instantClaim(uint256 _amountInMaticX) external nonReentrant {
 		if (!instantRedeemEnabled) revert InstantRedeemNotEnabled();
 		if (_amountInMaticX == 0) revert ZeroAmount();
 
-		uint256 amountInPol = (_amountInMaticX * frozenRate) /
-			FROZEN_RATE_PRECISION;
+		uint256 amountInPol = (_amountInMaticX * terminalRate) /
+			TERMINAL_RATE_PRECISION;
 		if (amountInPol == 0) revert AmountInPolZero();
-		if (drainedPolBalance < amountInPol) {
-			revert InsufficientDrainedBalance();
+		if (recalledPolBalance < amountInPol) {
+			revert InsufficientRecalledBalance();
 		}
 
 		_burn(msg.sender, _amountInMaticX);
-		drainedPolBalance -= amountInPol;
+		recalledPolBalance -= amountInPol;
 		polToken.safeTransfer(msg.sender, amountInPol);
 
 		emit InstantClaimed(msg.sender, _amountInMaticX, amountInPol);
@@ -676,15 +676,15 @@ contract MaticX is
 	function sweepToCustody(
 		address _custody
 	) external nonReentrant onlyRole(DEFAULT_ADMIN_ROLE) {
-		if (!drainComplete) revert DrainNotComplete();
-		if (block.timestamp < drainCompleteTimestamp + CUSTODY_DELAY) {
+		if (!assetRecallComplete) revert AssetRecallNotComplete();
+		if (block.timestamp < assetRecallTimestamp + CUSTODY_DELAY) {
 			revert CustodyDelayNotElapsed();
 		}
 		if (_custody == address(0)) revert ZeroAddress();
 
 		uint256 polBal = polToken.balanceOf(address(this));
 		uint256 maticBal = maticToken.balanceOf(address(this));
-		drainedPolBalance = 0;
+		recalledPolBalance = 0;
 
 		if (polBal > 0) polToken.safeTransfer(_custody, polBal);
 		if (maticBal > 0) maticToken.safeTransfer(_custody, maticBal);

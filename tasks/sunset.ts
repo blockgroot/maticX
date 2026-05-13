@@ -4,7 +4,7 @@ import { task, types } from "hardhat/config";
 import { HardhatRuntimeEnvironment } from "hardhat/types";
 
 /**
- * Operational tasks for the MaticX sunset (v2 — drain-and-hold).
+ * Operational tasks for the MaticX sunset (v2 — recall-and-hold).
  *
  *   hardhat sunset:deploy-impl    --network ethereum
  *   hardhat sunset:encode-upgrade --network ethereum   # multisig/timelock calldata
@@ -12,7 +12,7 @@ import { HardhatRuntimeEnvironment } from "hardhat/types";
  *   hardhat sunset:status         --network ethereum   # state dump at every step
  *   hardhat sunset:encode-step    --step <name> [--arg <value>]
  *
- * Steps for encode-step: pause | bulk-unstake | claim-drain | freeze |
+ * Steps for encode-step: pause | bulk-unstake | claim-recall | freeze |
  *                        push-l2 | enable-instant-redeem | disable-instant-redeem |
  *                        sweep
  */
@@ -191,33 +191,33 @@ task("sunset:verify-upgrade")
 		);
 		const [
 			paused,
-			drainComplete,
+			assetRecallComplete,
 			instantRedeemEnabled,
-			drainedPolBalance,
-			frozenRate,
-			drainCompleteTimestamp,
+			recalledPolBalance,
+			terminalRate,
+			assetRecallTimestamp,
 		] = await Promise.all([
 			maticX.paused(),
-			maticX.drainComplete(),
+			maticX.assetRecallComplete(),
 			maticX.instantRedeemEnabled(),
-			maticX.drainedPolBalance(),
-			maticX.frozenRate(),
-			maticX.drainCompleteTimestamp(),
+			maticX.recalledPolBalance(),
+			maticX.terminalRate(),
+			maticX.assetRecallTimestamp(),
 		]);
 
 		console.log("paused                 ", paused);
-		console.log("drainComplete          ", drainComplete);
+		console.log("assetRecallComplete          ", assetRecallComplete);
 		console.log("instantRedeemEnabled   ", instantRedeemEnabled);
-		console.log("drainedPolBalance      ", drainedPolBalance.toString());
-		console.log("frozenRate             ", frozenRate.toString());
-		console.log("drainCompleteTimestamp ", drainCompleteTimestamp.toString());
+		console.log("recalledPolBalance      ", recalledPolBalance.toString());
+		console.log("terminalRate             ", terminalRate.toString());
+		console.log("assetRecallTimestamp ", assetRecallTimestamp.toString());
 
 		const fresh =
-			!drainComplete &&
+			!assetRecallComplete &&
 			!instantRedeemEnabled &&
-			drainedPolBalance === 0n &&
-			frozenRate === 0n &&
-			drainCompleteTimestamp === 0n;
+			recalledPolBalance === 0n &&
+			terminalRate === 0n &&
+			assetRecallTimestamp === 0n;
 		if (!fresh) {
 			throw new Error(
 				"Post-upgrade sunset state is not fresh. Aborting."
@@ -245,43 +245,43 @@ task("sunset:status")
 
 		const [
 			paused,
-			drainComplete,
+			assetRecallComplete,
 			instantRedeemEnabled,
-			drainedPolBalance,
-			frozenRate,
-			drainCompleteTimestamp,
+			recalledPolBalance,
+			terminalRate,
+			assetRecallTimestamp,
 			totalSupply,
 			polBalance,
 			maticBalance,
 		] = await Promise.all([
 			maticX.paused(),
-			maticX.drainComplete(),
+			maticX.assetRecallComplete(),
 			maticX.instantRedeemEnabled(),
-			maticX.drainedPolBalance(),
-			maticX.frozenRate(),
-			maticX.drainCompleteTimestamp(),
+			maticX.recalledPolBalance(),
+			maticX.terminalRate(),
+			maticX.assetRecallTimestamp(),
 			maticX.totalSupply(),
 			pol.balanceOf(dep.eth_maticX_proxy),
 			matic.balanceOf(dep.eth_maticX_proxy),
 		]);
 
-		const drift = polBalance - drainedPolBalance;
+		const drift = polBalance - recalledPolBalance;
 
 		console.log("MaticX proxy:", dep.eth_maticX_proxy);
 		console.log("  paused                 :", paused);
-		console.log("  drainComplete          :", drainComplete);
+		console.log("  assetRecallComplete          :", assetRecallComplete);
 		console.log("  instantRedeemEnabled   :", instantRedeemEnabled);
-		console.log("  drainedPolBalance      :", drainedPolBalance.toString());
-		console.log("  frozenRate             :", frozenRate.toString());
+		console.log("  recalledPolBalance      :", recalledPolBalance.toString());
+		console.log("  terminalRate             :", terminalRate.toString());
 		console.log(
-			"  drainCompleteTimestamp :",
-			drainCompleteTimestamp.toString()
+			"  assetRecallTimestamp :",
+			assetRecallTimestamp.toString()
 		);
 		console.log("  totalSupply (MATICx)   :", totalSupply.toString());
 		console.log("  POL balance            :", polBalance.toString());
 		console.log("  MATIC balance          :", maticBalance.toString());
 		console.log(
-			"  drift (POL-drained)    :",
+			"  drift (POL-recalled)    :",
 			drift.toString(),
 			drift === 0n ? "(in sync)" : "(check post-claim flows)"
 		);
@@ -297,9 +297,9 @@ const STEP_ENCODERS: Record<
 > = {
 	pause: async () => encodeMaticX("togglePause", []),
 	"bulk-unstake": async () => encodeMaticX("bulkUnstakeAllValidators", []),
-	"claim-drain": async () => encodeMaticX("claimDrainNonces", []),
-	freeze: async () => encodeMaticX("freezeExchangeRate", []),
-	"push-l2": async () => encodeMaticX("pushFrozenRateToL2", []),
+	"claim-recall": async () => encodeMaticX("claimAssetRecallNonces", []),
+	freeze: async () => encodeMaticX("finalizeTerminalRate", []),
+	"push-l2": async () => encodeMaticX("pushTerminalRateToL2", []),
 	"enable-instant-redeem": async () =>
 		encodeMaticX("setInstantRedeemEnabled", [true]),
 	"disable-instant-redeem": async () =>
@@ -318,9 +318,9 @@ function encodeMaticX(fn: string, args: unknown[]): string {
 	const iface = new (require("ethers").Interface)([
 		"function togglePause() external",
 		"function bulkUnstakeAllValidators() external",
-		"function claimDrainNonces() external",
-		"function freezeExchangeRate() external",
-		"function pushFrozenRateToL2() external",
+		"function claimAssetRecallNonces() external",
+		"function finalizeTerminalRate() external",
+		"function pushTerminalRateToL2() external",
 		"function setInstantRedeemEnabled(bool _enabled) external",
 		"function sweepToCustody(address _custody) external",
 	]);
