@@ -194,33 +194,36 @@ task("sunset:verify-upgrade")
 		);
 		const [
 			paused,
-			assetRecallComplete,
+			terminalRateLocked,
 			instantRedeemEnabled,
 			recalledPolBalance,
 			terminalRate,
-			assetRecallTimestamp,
+			terminalRateLockTimestamp,
 		] = await Promise.all([
 			maticX.paused(),
-			maticX.assetRecallComplete(),
+			maticX.terminalRateLocked(),
 			maticX.instantRedeemEnabled(),
 			maticX.recalledPolBalance(),
 			maticX.terminalRate(),
-			maticX.assetRecallTimestamp(),
+			maticX.terminalRateLockTimestamp(),
 		]);
 
 		console.log("paused                 ", paused);
-		console.log("assetRecallComplete          ", assetRecallComplete);
+		console.log("terminalRateLocked          ", terminalRateLocked);
 		console.log("instantRedeemEnabled   ", instantRedeemEnabled);
 		console.log("recalledPolBalance      ", recalledPolBalance.toString());
 		console.log("terminalRate             ", terminalRate.toString());
-		console.log("assetRecallTimestamp ", assetRecallTimestamp.toString());
+		console.log(
+			"terminalRateLockTimestamp ",
+			terminalRateLockTimestamp.toString()
+		);
 
 		const fresh =
-			!assetRecallComplete &&
+			!terminalRateLocked &&
 			!instantRedeemEnabled &&
 			recalledPolBalance === 0n &&
 			terminalRate === 0n &&
-			assetRecallTimestamp === 0n;
+			terminalRateLockTimestamp === 0n;
 		if (!fresh) {
 			throw new Error(
 				"Post-upgrade sunset state is not fresh. Aborting."
@@ -248,21 +251,21 @@ task("sunset:status")
 
 		const [
 			paused,
-			assetRecallComplete,
+			terminalRateLocked,
 			instantRedeemEnabled,
 			recalledPolBalance,
 			terminalRate,
-			assetRecallTimestamp,
+			terminalRateLockTimestamp,
 			totalSupply,
 			polBalance,
 			maticBalance,
 		] = await Promise.all([
 			maticX.paused(),
-			maticX.assetRecallComplete(),
+			maticX.terminalRateLocked(),
 			maticX.instantRedeemEnabled(),
 			maticX.recalledPolBalance(),
 			maticX.terminalRate(),
-			maticX.assetRecallTimestamp(),
+			maticX.terminalRateLockTimestamp(),
 			maticX.totalSupply(),
 			pol.balanceOf(dep.eth_maticX_proxy),
 			matic.balanceOf(dep.eth_maticX_proxy),
@@ -272,7 +275,7 @@ task("sunset:status")
 
 		console.log("MaticX proxy:", dep.eth_maticX_proxy);
 		console.log("  paused                 :", paused);
-		console.log("  assetRecallComplete          :", assetRecallComplete);
+		console.log("  terminalRateLocked          :", terminalRateLocked);
 		console.log("  instantRedeemEnabled   :", instantRedeemEnabled);
 		console.log(
 			"  recalledPolBalance      :",
@@ -280,8 +283,8 @@ task("sunset:status")
 		);
 		console.log("  terminalRate             :", terminalRate.toString());
 		console.log(
-			"  assetRecallTimestamp :",
-			assetRecallTimestamp.toString()
+			"  terminalRateLockTimestamp :",
+			terminalRateLockTimestamp.toString()
 		);
 		console.log("  totalSupply (MATICx)   :", totalSupply.toString());
 		console.log("  POL balance            :", polBalance.toString());

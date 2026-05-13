@@ -244,7 +244,7 @@ describe("MaticX sunset", function () {
 				.to.emit(maticX, "AssetRecallCompleted")
 				.withArgs(polBalAfter, supply, expectedRate);
 
-			expect(await maticX.assetRecallComplete()).to.equal(true);
+			expect(await maticX.terminalRateLocked()).to.equal(true);
 			expect(await maticX.terminalRate()).to.equal(expectedRate);
 			expect(await maticX.recalledPolBalance()).to.equal(polBalAfter);
 
@@ -371,7 +371,7 @@ describe("MaticX sunset", function () {
 			).to.be.reverted;
 		});
 
-		it("reverts after assetRecallComplete", async function () {
+		it("reverts after terminalRateLocked", async function () {
 			const fx = await loadFixture(deployFixture);
 			const { maticX, manager } = fx;
 			await pauseRecallAndFinalize(fx);
@@ -379,7 +379,7 @@ describe("MaticX sunset", function () {
 				(maticX.connect(manager) as MaticX).bulkUnstakeAllValidators()
 			).to.be.revertedWithCustomError(
 				maticX,
-				"AssetRecallAlreadyComplete"
+				"TerminalRateAlreadyLocked"
 			);
 		});
 	});
@@ -392,7 +392,7 @@ describe("MaticX sunset", function () {
 			).to.be.revertedWith("Pause first");
 		});
 
-		it("reverts after assetRecallComplete", async function () {
+		it("reverts after terminalRateLocked", async function () {
 			const fx = await loadFixture(deployFixture);
 			const { maticX, manager } = fx;
 			await pauseRecallAndFinalize(fx);
@@ -400,7 +400,7 @@ describe("MaticX sunset", function () {
 				(maticX.connect(manager) as MaticX).claimAssetRecallNonces()
 			).to.be.revertedWithCustomError(
 				maticX,
-				"AssetRecallAlreadyComplete"
+				"TerminalRateAlreadyLocked"
 			);
 		});
 
@@ -419,8 +419,8 @@ describe("MaticX sunset", function () {
 					// Validator may revert if unbond not matured; test only
 					// verifies retry-safety on our side.
 				});
-			// Should not be assetRecallComplete yet
-			expect(await maticX.assetRecallComplete()).to.equal(false);
+			// Should not be terminalRateLocked yet
+			expect(await maticX.terminalRateLocked()).to.equal(false);
 		});
 	});
 
@@ -440,7 +440,7 @@ describe("MaticX sunset", function () {
 				(maticX.connect(manager) as MaticX).finalizeTerminalRate()
 			).to.be.revertedWithCustomError(
 				maticX,
-				"AssetRecallAlreadyComplete"
+				"TerminalRateAlreadyLocked"
 			);
 		});
 
@@ -468,7 +468,7 @@ describe("MaticX sunset", function () {
 			const { maticX, manager } = await loadFixture(deployFixture);
 			await expect(
 				(maticX.connect(manager) as MaticX).pushTerminalRateToL2()
-			).to.be.revertedWithCustomError(maticX, "AssetRecallNotComplete");
+			).to.be.revertedWithCustomError(maticX, "TerminalRateNotLocked");
 		});
 
 		it("is idempotent (can be called twice after freeze)", async function () {
@@ -489,7 +489,7 @@ describe("MaticX sunset", function () {
 				(maticX.connect(manager) as MaticX).setInstantRedeemEnabled(
 					true
 				)
-			).to.be.revertedWithCustomError(maticX, "AssetRecallNotComplete");
+			).to.be.revertedWithCustomError(maticX, "TerminalRateNotLocked");
 		});
 
 		it("allows disabling pre-freeze (kill-switch is unconditional)", async function () {
@@ -629,7 +629,7 @@ describe("MaticX sunset", function () {
 				(maticX.connect(manager) as MaticX).sweepToCustody(
 					custody.address
 				)
-			).to.be.revertedWithCustomError(maticX, "AssetRecallNotComplete");
+			).to.be.revertedWithCustomError(maticX, "TerminalRateNotLocked");
 		});
 
 		it("reverts before the custody delay elapses", async function () {
