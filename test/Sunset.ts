@@ -371,16 +371,24 @@ describe("MaticX sunset", function () {
 			).to.be.reverted;
 		});
 
+		it("reverts on the second call with RecallAlreadyInitiated", async function () {
+			const { maticX, manager } = await loadFixture(deployFixture);
+			await (maticX.connect(manager) as MaticX).togglePause();
+			await (
+				maticX.connect(manager) as MaticX
+			).bulkUnstakeAllValidators();
+			await expect(
+				(maticX.connect(manager) as MaticX).bulkUnstakeAllValidators()
+			).to.be.revertedWithCustomError(maticX, "RecallAlreadyInitiated");
+		});
+
 		it("reverts after terminalRateLocked", async function () {
 			const fx = await loadFixture(deployFixture);
 			const { maticX, manager } = fx;
 			await pauseRecallAndFinalize(fx);
 			await expect(
 				(maticX.connect(manager) as MaticX).bulkUnstakeAllValidators()
-			).to.be.revertedWithCustomError(
-				maticX,
-				"TerminalRateAlreadyLocked"
-			);
+			).to.be.revertedWithCustomError(maticX, "RecallAlreadyInitiated");
 		});
 	});
 
@@ -402,6 +410,14 @@ describe("MaticX sunset", function () {
 				maticX,
 				"TerminalRateAlreadyLocked"
 			);
+		});
+
+		it("reverts with RecallNotInitiated when called before bulkUnstake", async function () {
+			const { maticX, manager } = await loadFixture(deployFixture);
+			await (maticX.connect(manager) as MaticX).togglePause();
+			await expect(
+				(maticX.connect(manager) as MaticX).claimAssetRecallNonces()
+			).to.be.revertedWithCustomError(maticX, "RecallNotInitiated");
 		});
 
 		it("is a no-op (no nonces, no revert) when called twice before the unbond matures", async function () {
@@ -442,6 +458,17 @@ describe("MaticX sunset", function () {
 				maticX,
 				"TerminalRateAlreadyLocked"
 			);
+		});
+
+		it("reverts with RecallClaimsNotComplete when finalize runs before claim", async function () {
+			const { maticX, manager } = await loadFixture(deployFixture);
+			await (maticX.connect(manager) as MaticX).togglePause();
+			await (
+				maticX.connect(manager) as MaticX
+			).bulkUnstakeAllValidators();
+			await expect(
+				(maticX.connect(manager) as MaticX).finalizeTerminalRate()
+			).to.be.revertedWithCustomError(maticX, "RecallClaimsNotComplete");
 		});
 
 		it("reverts EmptyContract when there is no POL balance", async function () {
@@ -755,6 +782,71 @@ describe("MaticX sunset", function () {
 				polBeforeUser
 			);
 			expect(await maticX.recalledPolBalance()).to.equal(recalledBefore);
+		});
+	});
+
+	describe("togglePause one-way after recall", function () {
+		it("reverts unpause with UnpauseLockedAfterRecall once recallInitiated", async function () {
+			const { maticX, manager } = await loadFixture(deployFixture);
+			await (maticX.connect(manager) as MaticX).togglePause();
+			await (
+				maticX.connect(manager) as MaticX
+			).bulkUnstakeAllValidators();
+			expect(await maticX.paused()).to.equal(true);
+			expect(await maticX.recallInitiated()).to.equal(true);
+			await expect(
+				(maticX.connect(manager) as MaticX).togglePause()
+			).to.be.revertedWithCustomError(maticX, "UnpauseLockedAfterRecall");
+		});
+	});
+
+	describe("Oracle freeze during recall", function () {
+		it("serves preFinalizeRate between bulkUnstake and finalize", async function () {
+			const { maticX, manager } = await loadFixture(deployFixture);
+			await (maticX.connect(manager) as MaticX).togglePause();
+			await (
+				maticX.connect(manager) as MaticX
+			).bulkUnstakeAllValidators();
+
+			const snap = await maticX.preFinalizeRate();
+			expect(snap).to.be.gt(0n);
+
+			// Read oracle while in recall window — must serve preFinalizeRate,
+			// not the legacy live rate (which would drift to 0 as stake leaves).
+			const [polOut] = await maticX.convertMaticXToPOL(
+				TERMINAL_RATE_PRECISION
+			);
+			expect(polOut).to.equal(snap);
+		});
+	});
+
+	describe("Recall-gated setters", function () {
+		it("setValidatorRegistry reverts with RecallAlreadyInitiated post-bulkUnstake", async function () {
+			const { maticX, manager, validatorRegistry } =
+				await loadFixture(deployFixture);
+			await (maticX.connect(manager) as MaticX).togglePause();
+			await (
+				maticX.connect(manager) as MaticX
+			).bulkUnstakeAllValidators();
+			await expect(
+				(maticX.connect(manager) as MaticX).setValidatorRegistry(
+					await validatorRegistry.getAddress()
+				)
+			).to.be.revertedWithCustomError(maticX, "RecallAlreadyInitiated");
+		});
+
+		it("setFxStateRootTunnel reverts with RecallAlreadyInitiated post-bulkUnstake", async function () {
+			const { maticX, manager, fxStateRootTunnel } =
+				await loadFixture(deployFixture);
+			await (maticX.connect(manager) as MaticX).togglePause();
+			await (
+				maticX.connect(manager) as MaticX
+			).bulkUnstakeAllValidators();
+			await expect(
+				(maticX.connect(manager) as MaticX).setFxStateRootTunnel(
+					await fxStateRootTunnel.getAddress()
+				)
+			).to.be.revertedWithCustomError(maticX, "RecallAlreadyInitiated");
 		});
 	});
 });
