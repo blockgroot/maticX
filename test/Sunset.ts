@@ -132,9 +132,7 @@ describe("MaticX sunset", function () {
 			await pol
 				.connect(polygonTreasury)
 				.transfer(staker.address, stakeAmount * 3n);
-			await pol
-				.connect(staker)
-				.approve(maticXAddress, stakeAmount * 3n);
+			await pol.connect(staker).approve(maticXAddress, stakeAmount * 3n);
 			await (maticX.connect(staker) as MaticX).submitPOL(stakeAmount);
 		}
 
@@ -285,9 +283,7 @@ describe("MaticX sunset", function () {
 			expect(await maticX.recalledPolBalance()).to.equal(
 				recalledBefore - expectedPol
 			);
-			expect(await pol.balanceOf(stakerA.address)).to.be.gte(
-				expectedPol
-			);
+			expect(await pol.balanceOf(stakerA.address)).to.be.gte(expectedPol);
 
 			// 9. Sweep — must wait the full custody delay
 			await expect(
@@ -381,7 +377,10 @@ describe("MaticX sunset", function () {
 			await pauseRecallAndFinalize(fx);
 			await expect(
 				(maticX.connect(manager) as MaticX).bulkUnstakeAllValidators()
-			).to.be.revertedWithCustomError(maticX, "AssetRecallAlreadyComplete");
+			).to.be.revertedWithCustomError(
+				maticX,
+				"AssetRecallAlreadyComplete"
+			);
 		});
 	});
 
@@ -399,19 +398,27 @@ describe("MaticX sunset", function () {
 			await pauseRecallAndFinalize(fx);
 			await expect(
 				(maticX.connect(manager) as MaticX).claimAssetRecallNonces()
-			).to.be.revertedWithCustomError(maticX, "AssetRecallAlreadyComplete");
+			).to.be.revertedWithCustomError(
+				maticX,
+				"AssetRecallAlreadyComplete"
+			);
 		});
 
 		it("is a no-op (no nonces, no revert) when called twice before the unbond matures", async function () {
 			const { maticX, manager } = await loadFixture(deployFixture);
 			await (maticX.connect(manager) as MaticX).togglePause();
-			await (maticX.connect(manager) as MaticX).bulkUnstakeAllValidators();
+			await (
+				maticX.connect(manager) as MaticX
+			).bulkUnstakeAllValidators();
 			// Without epoch advance: nonces should still be there; claim will revert internally.
 			// We accept either revert or success on the validator side; the test verifies
 			// the function itself does not corrupt state on retry.
 			await (maticX.connect(manager) as MaticX)
 				.claimAssetRecallNonces()
-				.catch(() => {});
+				.catch(() => {
+					// Validator may revert if unbond not matured; test only
+					// verifies retry-safety on our side.
+				});
 			// Should not be assetRecallComplete yet
 			expect(await maticX.assetRecallComplete()).to.equal(false);
 		});
@@ -431,7 +438,10 @@ describe("MaticX sunset", function () {
 			await pauseRecallAndFinalize(fx);
 			await expect(
 				(maticX.connect(manager) as MaticX).finalizeTerminalRate()
-			).to.be.revertedWithCustomError(maticX, "AssetRecallAlreadyComplete");
+			).to.be.revertedWithCustomError(
+				maticX,
+				"AssetRecallAlreadyComplete"
+			);
 		});
 
 		it("reverts EmptyContract when there is no POL balance", async function () {
@@ -513,9 +523,9 @@ describe("MaticX sunset", function () {
 			fx: Awaited<ReturnType<typeof deployFixture>>
 		) {
 			await pauseRecallAndFinalize(fx);
-			await (fx.maticX.connect(fx.manager) as MaticX).setInstantRedeemEnabled(
-				true
-			);
+			await (
+				fx.maticX.connect(fx.manager) as MaticX
+			).setInstantRedeemEnabled(true);
 		}
 
 		it("reverts if redeem flag is off", async function () {
@@ -578,7 +588,10 @@ describe("MaticX sunset", function () {
 				(maticX.connect(stakerA) as MaticX).instantClaim(
 					await maticX.balanceOf(stakerA.address)
 				)
-			).to.be.revertedWithCustomError(maticX, "InsufficientRecalledBalance");
+			).to.be.revertedWithCustomError(
+				maticX,
+				"InsufficientRecalledBalance"
+			);
 		});
 
 		it("burns shares, decrements recalledPolBalance, and transfers POL", async function () {
@@ -717,7 +730,9 @@ describe("MaticX sunset", function () {
 
 			// Sunset proceeds
 			await (maticX.connect(manager) as MaticX).togglePause();
-			await (maticX.connect(manager) as MaticX).bulkUnstakeAllValidators();
+			await (
+				maticX.connect(manager) as MaticX
+			).bulkUnstakeAllValidators();
 
 			// Advance epoch past user's request delay
 			const withdrawalDelay = await stakeManager.withdrawalDelay();

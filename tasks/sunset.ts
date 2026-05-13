@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { Interface } from "ethers";
 import { task, types } from "hardhat/config";
 import { HardhatRuntimeEnvironment } from "hardhat/types";
 
@@ -93,10 +94,7 @@ task("sunset:deploy-impl")
 			"eth_maticX_sunset_impl",
 			implAddress as string
 		);
-		console.log(
-			"\nNext: hardhat sunset:encode-upgrade --network",
-			network
-		);
+		console.log("\nNext: hardhat sunset:encode-upgrade --network", network);
 	});
 
 task("sunset:encode-upgrade")
@@ -181,8 +179,13 @@ task("sunset:verify-upgrade")
 		const expectedImpl = dep.eth_maticX_sunset_impl;
 		console.log("Live impl:    ", liveImpl);
 		console.log("Expected impl:", expectedImpl);
-		if (expectedImpl && liveImpl.toLowerCase() !== expectedImpl.toLowerCase()) {
-			throw new Error("Live implementation does not match expected impl.");
+		if (
+			expectedImpl &&
+			liveImpl.toLowerCase() !== expectedImpl.toLowerCase()
+		) {
+			throw new Error(
+				"Live implementation does not match expected impl."
+			);
 		}
 
 		const maticX = await hre.ethers.getContractAt(
@@ -271,7 +274,10 @@ task("sunset:status")
 		console.log("  paused                 :", paused);
 		console.log("  assetRecallComplete          :", assetRecallComplete);
 		console.log("  instantRedeemEnabled   :", instantRedeemEnabled);
-		console.log("  recalledPolBalance      :", recalledPolBalance.toString());
+		console.log(
+			"  recalledPolBalance      :",
+			recalledPolBalance.toString()
+		);
 		console.log("  terminalRate             :", terminalRate.toString());
 		console.log(
 			"  assetRecallTimestamp :",
@@ -306,16 +312,14 @@ const STEP_ENCODERS: Record<
 		encodeMaticX("setInstantRedeemEnabled", [false]),
 	sweep: async (hre, _dep, arg) => {
 		if (!arg || !hre.ethers.isAddress(arg)) {
-			throw new Error(
-				"sweep step requires --arg <custodyAddress>"
-			);
+			throw new Error("sweep step requires --arg <custodyAddress>");
 		}
 		return encodeMaticX("sweepToCustody", [arg]);
 	},
 };
 
 function encodeMaticX(fn: string, args: unknown[]): string {
-	const iface = new (require("ethers").Interface)([
+	const iface = new Interface([
 		"function togglePause() external",
 		"function bulkUnstakeAllValidators() external",
 		"function claimAssetRecallNonces() external",
