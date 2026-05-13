@@ -70,6 +70,7 @@ contract MaticX is
 	error ZeroAmount();
 	error InstantRedeemNotEnabled();
 	error ValidatorAlreadyRecalled();
+	error UnpauseLockedAfterRecall();
 
 	/// ---------------------- Sunset events -----------------------------------
 	event AssetRecallInitiated(
@@ -793,8 +794,17 @@ contract MaticX is
 		emit SetVersion(_version);
 	}
 
-	/// @notice Toggles the paused status of this contract.
+	/// @notice Toggles the paused status of this contract. Once
+	/// `bulkUnstakeAllValidators` has run (i.e. `recallInitiated == true`),
+	/// the contract cannot be unpaused: the sunset has crossed the point
+	/// of no return at the Polygon protocol level (sold vouchers cannot be
+	/// un-sold), so all `whenNotPaused` user paths (submit / requestWithdraw
+	/// / claimWithdrawal / withdrawRewards / stakeRewards) stay bricked
+	/// for the rest of the contract's life.
 	function togglePause() external override onlyRole(DEFAULT_ADMIN_ROLE) {
+		if (recallInitiated && paused()) {
+			revert UnpauseLockedAfterRecall();
+		}
 		paused() ? _unpause() : _pause();
 	}
 
