@@ -56,6 +56,8 @@ contract MaticX is
 	uint256 public terminalRate;
 	uint256 public assetRecallTimestamp;
 	mapping(address => uint256) public assetRecallNonces;
+	bool public recallInitiated;
+	uint256 public preFinalizeRate;
 
 	/// ---------------------- Sunset errors -----------------------------------
 	error AssetRecallAlreadyComplete();
@@ -80,7 +82,10 @@ contract MaticX is
 		uint256 supplyAtFreeze,
 		uint256 terminalRate
 	);
-	event TerminalRatePushedToL2(uint256 supplyAtPush, uint256 recalledPolBalance);
+	event TerminalRatePushedToL2(
+		uint256 supplyAtPush,
+		uint256 recalledPolBalance
+	);
 	event InstantRedeemToggled(address indexed by, bool enabled);
 	event InstantClaimed(
 		address indexed user,
@@ -547,6 +552,21 @@ contract MaticX is
 		require(paused(), "Pause first");
 		if (assetRecallComplete) revert AssetRecallAlreadyComplete();
 
+		// Freeze oracle the moment recall begins. Live legacy path would
+		// drift toward 0 as `sellVoucher_newPOL` moves stake into the
+		// withdraw pool; lending markets reading the rate would see a
+		// crash and could mass-liquidate users before instant redeem
+		// even goes live. Snapshot once, oracle reads it until finalize
+		// replaces with the actual `terminalRate`.
+		if (!recallInitiated) {
+			recallInitiated = true;
+			uint256 supplySnap = totalSupply();
+			preFinalizeRate = supplySnap == 0
+				? 0
+				: (getTotalStakeAcrossAllValidators() *
+					TERMINAL_RATE_PRECISION) / supplySnap;
+		}
+
 		uint256[] memory validatorIds = validatorRegistry.getValidators();
 		uint256 validatorCount = validatorIds.length;
 
@@ -811,6 +831,23 @@ contract MaticX is
 	function _convertMaticXToPOL(
 		uint256 _balance
 	) private view returns (uint256, uint256, uint256) {
+		// Post-finalize: serve the locked terminal rate so lending-market
+		// oracles cannot be moved by donations or recalled-balance burns.
+		if (assetRecallComplete) {
+			uint256 rate = terminalRate == 0 ? 1 : terminalRate;
+			uint256 balanceInPOL = (_balance * rate) / TERMINAL_RATE_PRECISION;
+			return (balanceInPOL, TERMINAL_RATE_PRECISION, rate);
+		}
+
+		// During recall (post-bulkUnstake, pre-finalize): serve the
+		// pre-recall snapshot so oracle does not drift toward zero as
+		// validators unbond.
+		if (recallInitiated) {
+			uint256 rate = preFinalizeRate == 0 ? 1 : preFinalizeRate;
+			uint256 balanceInPOL = (_balance * rate) / TERMINAL_RATE_PRECISION;
+			return (balanceInPOL, TERMINAL_RATE_PRECISION, rate);
+		}
+
 		uint256 totalShares = totalSupply();
 		totalShares = totalShares == 0 ? 1 : totalShares;
 
@@ -855,6 +892,23 @@ contract MaticX is
 	function _convertPOLToMaticX(
 		uint256 _balance
 	) private view returns (uint256, uint256, uint256) {
+		// Post-finalize: serve the locked terminal rate. Inverse of
+		// `_convertMaticXToPOL`. Same donation/burn-drift protection.
+		if (assetRecallComplete) {
+			uint256 rate = terminalRate == 0 ? 1 : terminalRate;
+			uint256 balanceInMaticX = (_balance * TERMINAL_RATE_PRECISION) /
+				rate;
+			return (balanceInMaticX, TERMINAL_RATE_PRECISION, rate);
+		}
+
+		// During recall: serve the pre-recall snapshot.
+		if (recallInitiated) {
+			uint256 rate = preFinalizeRate == 0 ? 1 : preFinalizeRate;
+			uint256 balanceInMaticX = (_balance * TERMINAL_RATE_PRECISION) /
+				rate;
+			return (balanceInMaticX, TERMINAL_RATE_PRECISION, rate);
+		}
+
 		uint256 totalShares = totalSupply();
 		totalShares = totalShares == 0 ? 1 : totalShares;
 
