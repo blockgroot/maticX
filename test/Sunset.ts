@@ -201,6 +201,46 @@ describe("MaticX sunset", function () {
 		);
 	}
 
+	// Probe to find the slot index of a mapping(address => uint256) so we can
+	// write to mapping[key] via setStorageAt. Returns the *mapping slot index*
+	// (S) — actual storage at `keccak256(abi.encode(key, S))`.
+	async function findMappingSlot(
+		contractAddress: string,
+		key: string,
+		readValue: () => Promise<bigint>,
+		probeValue: bigint,
+		maxSlots = 1000
+	): Promise<number> {
+		const abiCoder = ethers.AbiCoder.defaultAbiCoder();
+		for (let s = 0; s < maxSlots; s++) {
+			const valueSlot = ethers.keccak256(
+				abiCoder.encode(["address", "uint256"], [key, s])
+			);
+			const original = await getStorageAt(contractAddress, valueSlot);
+			await setStorageAt(contractAddress, valueSlot, probeValue);
+			const observed = await readValue();
+			await setStorageAt(contractAddress, valueSlot, original);
+			if (observed === probeValue) return s;
+		}
+		throw new Error(
+			`Could not find mapping slot for key ${key} on ${contractAddress}`
+		);
+	}
+
+	// Write a uint256 directly into mapping[key] at the discovered slot index.
+	async function writeMappingValue(
+		contractAddress: string,
+		mappingSlot: number,
+		key: string,
+		value: bigint
+	): Promise<void> {
+		const abiCoder = ethers.AbiCoder.defaultAbiCoder();
+		const valueSlot = ethers.keccak256(
+			abiCoder.encode(["address", "uint256"], [key, mappingSlot])
+		);
+		await setStorageAt(contractAddress, valueSlot, value);
+	}
+
 	describe("End-to-end happy path", function () {
 		it("runs the full sunset sequence and lets users redeem at the terminal rate", async function () {
 			const fx = await loadFixture(deployFixture);
@@ -220,10 +260,31 @@ describe("MaticX sunset", function () {
 			await (maticX.connect(manager) as MaticX).togglePause();
 			expect(await maticX.paused()).to.equal(true);
 
-			// 2. Bulk unstake
+			// 2. Bulk unstake — assert AssetRecallInitiated event args on the
+			// preferred deposit validator (the only one with stake in this
+			// fresh-proxy fixture).
+			const [preferredId] =
+				await fx.validatorRegistry.getValidators();
+			const preferredShare = await stakeManager.getValidatorContract(
+				preferredId
+			);
+			const vs = await ethers.getContractAt(
+				[
+					"function getTotalStake(address) view returns (uint256, uint256)",
+					"function unbondNonces(address) view returns (uint256)",
+				],
+				preferredShare
+			);
+			const [stakeBefore] = (await vs.getTotalStake(maticXAddress)) as [
+				bigint,
+				bigint,
+			];
+			const nonceBefore = (await vs.unbondNonces(maticXAddress)) as bigint;
 			await expect(
 				(maticX.connect(manager) as MaticX).bulkUnstakeAllValidators()
-			).to.emit(maticX, "AssetRecallInitiated");
+			)
+				.to.emit(maticX, "AssetRecallInitiated")
+				.withArgs(preferredShare, nonceBefore + 1n, stakeBefore);
 
 			// 3. Advance epoch past unbond
 			await advanceUnbond(stakeManager, stakeManagerGovernance);
@@ -295,11 +356,14 @@ describe("MaticX sunset", function () {
 			await time.increase(CUSTODY_DELAY + 1n);
 
 			const polBeforeSweep = await pol.balanceOf(maticXAddress);
+			const maticBeforeSweep = await fx.matic.balanceOf(maticXAddress);
 			await expect(
 				(maticX.connect(manager) as MaticX).sweepToCustody(
 					custody.address
 				)
-			).to.emit(maticX, "SweptToCustody");
+			)
+				.to.emit(maticX, "SweptToCustody")
+				.withArgs(custody.address, polBeforeSweep, maticBeforeSweep);
 
 			expect(await pol.balanceOf(maticXAddress)).to.equal(0);
 			expect(await pol.balanceOf(custody.address)).to.equal(
@@ -390,6 +454,53 @@ describe("MaticX sunset", function () {
 				(maticX.connect(manager) as MaticX).bulkUnstakeAllValidators()
 			).to.be.revertedWithCustomError(maticX, "RecallAlreadyInitiated");
 		});
+
+		it("skips validators with zero stake (no nonce, no event)", async function () {
+			// In the fresh-proxy fixture, only the preferred deposit validator
+			// has stake from the test stakers' submitPOL. The other 4 registered
+			// validators have stake == 0 for THIS proxy. The `if (stake > 0)`
+			// branch must skip them — no nonce, no event.
+			const fx = await loadFixture(deployFixture);
+			const { maticX, manager, stakeManager, validatorRegistry } = fx;
+			await (maticX.connect(manager) as MaticX).togglePause();
+
+			const validatorIds = await validatorRegistry.getValidators();
+			const sharesWithStake: string[] = [];
+			const sharesWithoutStake: string[] = [];
+			for (const id of validatorIds) {
+				const share = await stakeManager.getValidatorContract(id);
+				const vs = await ethers.getContractAt(
+					[
+						"function getTotalStake(address) view returns (uint256, uint256)",
+					],
+					share
+				);
+				const [stake] = (await vs.getTotalStake(
+					await maticX.getAddress()
+				)) as [bigint, bigint];
+				if (stake > 0n) sharesWithStake.push(share);
+				else sharesWithoutStake.push(share);
+			}
+			expect(sharesWithStake.length).to.be.gt(0);
+			expect(sharesWithoutStake.length).to.be.gt(0);
+
+			const tx = await (
+				maticX.connect(manager) as MaticX
+			).bulkUnstakeAllValidators();
+			const receipt = await tx.wait();
+			const topic =
+				maticX.interface.getEvent("AssetRecallInitiated")!.topicHash;
+			const emitted =
+				receipt?.logs.filter((l) => l.topics[0] === topic).length ?? 0;
+			expect(emitted).to.equal(sharesWithStake.length);
+
+			for (const share of sharesWithStake) {
+				expect(await maticX.assetRecallNonces(share)).to.be.gt(0n);
+			}
+			for (const share of sharesWithoutStake) {
+				expect(await maticX.assetRecallNonces(share)).to.equal(0n);
+			}
+		});
 	});
 
 	describe("claimAssetRecallNonces", function () {
@@ -421,22 +532,74 @@ describe("MaticX sunset", function () {
 		});
 
 		it("is a no-op (no nonces, no revert) when called twice before the unbond matures", async function () {
-			const { maticX, manager } = await loadFixture(deployFixture);
+			const fx = await loadFixture(deployFixture);
+			const { maticX, manager, stakeManager } = fx;
 			await (maticX.connect(manager) as MaticX).togglePause();
 			await (
 				maticX.connect(manager) as MaticX
 			).bulkUnstakeAllValidators();
-			// Without epoch advance: nonces should still be there; claim will revert internally.
-			// We accept either revert or success on the validator side; the test verifies
-			// the function itself does not corrupt state on retry.
+
+			// Capture per-validator nonces before the failed retry so we
+			// can confirm the tx-level revert rolls them back intact.
+			const validatorIds =
+				await fx.validatorRegistry.getValidators();
+			const shareAddrs = await Promise.all(
+				validatorIds.map((id) =>
+					stakeManager.getValidatorContract(id)
+				)
+			);
+			const noncesBefore = await Promise.all(
+				shareAddrs.map((vs) => maticX.assetRecallNonces(vs))
+			);
+			// Sanity: at least one nonce must be non-zero (bulk-unstake ran).
+			expect(noncesBefore.some((n) => n > 0n)).to.equal(true);
+
+			// Without epoch advance: nonces are immature; the inner
+			// unstakeClaimTokens_newPOL reverts and the whole tx rolls back.
 			await (maticX.connect(manager) as MaticX)
 				.claimAssetRecallNonces()
 				.catch(() => {
-					// Validator may revert if unbond not matured; test only
-					// verifies retry-safety on our side.
+					// Expected — validator unbond is not matured yet.
 				});
-			// Should not be terminalRateLocked yet
+
+			// Rollback contract: every per-validator nonce is preserved,
+			// and the recallClaimsComplete flag must NOT have been set
+			// since the loop never completed.
+			const noncesAfter = await Promise.all(
+				shareAddrs.map((vs) => maticX.assetRecallNonces(vs))
+			);
+			expect(noncesAfter).to.deep.equal(noncesBefore);
+			expect(await maticX.recallClaimsComplete()).to.equal(false);
 			expect(await maticX.terminalRateLocked()).to.equal(false);
+		});
+
+		it("sets recallClaimsComplete = true after a successful claim", async function () {
+			const fx = await loadFixture(deployFixture);
+			const {
+				maticX,
+				manager,
+				stakeManager,
+				stakeManagerGovernance,
+			} = fx;
+			await (maticX.connect(manager) as MaticX).togglePause();
+			await (
+				maticX.connect(manager) as MaticX
+			).bulkUnstakeAllValidators();
+			await advanceUnbond(stakeManager, stakeManagerGovernance);
+
+			expect(await maticX.recallClaimsComplete()).to.equal(false);
+			await (
+				maticX.connect(manager) as MaticX
+			).claimAssetRecallNonces();
+			expect(await maticX.recallClaimsComplete()).to.equal(true);
+
+			// Every per-validator nonce is cleared post-claim.
+			const validatorIds =
+				await fx.validatorRegistry.getValidators();
+			for (const id of validatorIds) {
+				const vs = await stakeManager.getValidatorContract(id);
+				expect(await maticX.assetRecallNonces(vs)).to.equal(0n);
+			}
 		});
 	});
 
@@ -471,22 +634,86 @@ describe("MaticX sunset", function () {
 			).to.be.revertedWithCustomError(maticX, "RecallClaimsNotComplete");
 		});
 
-		it("reverts EmptyContract when there is no POL balance", async function () {
-			// Deploy a fresh proxy without stakes and try to freeze
+		it("reverts EmptyContract when totalSupply is zero at finalize", async function () {
+			// Run the recall flow through claim, then zero `totalSupply` via
+			// direct storage manipulation right before finalize. This is the
+			// only realistic way to exercise the defensive branch — the
+			// contract's own happy path always has supply > 0.
 			const fx = await loadFixture(deployFixture);
-			const { maticX, manager, stakerA, stakerB, pol, maticXAddress } =
-				fx;
+			const {
+				maticX,
+				maticXAddress,
+				manager,
+				stakeManager,
+				stakeManagerGovernance,
+			} = fx;
+			await (maticX.connect(manager) as MaticX).togglePause();
+			await (
+				maticX.connect(manager) as MaticX
+			).bulkUnstakeAllValidators();
+			await advanceUnbond(stakeManager, stakeManagerGovernance);
+			await (
+				maticX.connect(manager) as MaticX
+			).claimAssetRecallNonces();
 
-			// Recall user balances by burning all MATICx via requestWithdraw → claim
-			// For this negative test, simpler: just verify EmptyContract reverts
-			// after pausing on a forked-but-modified state.
-			// Skipped: covered indirectly by the math test where rate > 0 implies balance > 0.
-			void maticX;
-			void manager;
-			void stakerA;
-			void stakerB;
-			void pol;
-			void maticXAddress;
+			const supplyBefore = await maticX.totalSupply();
+			expect(supplyBefore).to.be.gt(0n);
+			const supplySlot = await findScalarStorageSlot(
+				maticXAddress,
+				supplyBefore,
+				() => maticX.totalSupply(),
+				123456789n
+			);
+			await setStorageAt(maticXAddress, supplySlot, 0n);
+			expect(await maticX.totalSupply()).to.equal(0n);
+
+			await expect(
+				(maticX.connect(manager) as MaticX).finalizeTerminalRate()
+			).to.be.revertedWithCustomError(maticX, "EmptyContract");
+		});
+
+		it("reverts EmptyContract when polBalance is zero at finalize", async function () {
+			// Same gate, different branch of the `||`. Force the proxy's POL
+			// balance to 0 by writing to the POL token's balances mapping for
+			// this contract before finalize.
+			const fx = await loadFixture(deployFixture);
+			const {
+				maticX,
+				maticXAddress,
+				manager,
+				pol,
+				stakeManager,
+				stakeManagerGovernance,
+			} = fx;
+			await (maticX.connect(manager) as MaticX).togglePause();
+			await (
+				maticX.connect(manager) as MaticX
+			).bulkUnstakeAllValidators();
+			await advanceUnbond(stakeManager, stakeManagerGovernance);
+			await (
+				maticX.connect(manager) as MaticX
+			).claimAssetRecallNonces();
+
+			const polAddr = await pol.getAddress();
+			const before = await pol.balanceOf(maticXAddress);
+			expect(before).to.be.gt(0n);
+			const balancesSlot = await findMappingSlot(
+				polAddr,
+				maticXAddress,
+				async () => pol.balanceOf(maticXAddress),
+				123456789n
+			);
+			await writeMappingValue(
+				polAddr,
+				balancesSlot,
+				maticXAddress,
+				0n
+			);
+			expect(await pol.balanceOf(maticXAddress)).to.equal(0n);
+
+			await expect(
+				(maticX.connect(manager) as MaticX).finalizeTerminalRate()
+			).to.be.revertedWithCustomError(maticX, "EmptyContract");
 		});
 	});
 
@@ -703,6 +930,59 @@ describe("MaticX sunset", function () {
 				maticBefore
 			);
 		});
+
+		it("succeeds at the exact CUSTODY_DELAY boundary (< vs <= check)", async function () {
+			// Contract uses `block.timestamp < terminalRateLockTimestamp + CUSTODY_DELAY`
+			// so at exactly that timestamp the condition is false and sweep
+			// must succeed. Guards against off-by-one regressions.
+			const fx = await loadFixture(deployFixture);
+			const { maticX, manager, custody } = fx;
+			await pauseRecallAndFinalize(fx);
+
+			const lockTs = await maticX.terminalRateLockTimestamp();
+			await time.increaseTo(lockTs + CUSTODY_DELAY);
+			await expect(
+				(maticX.connect(manager) as MaticX).sweepToCustody(
+					custody.address
+				)
+			).to.emit(maticX, "SweptToCustody");
+		});
+
+		it("sweeps non-zero MATIC dust to custody", async function () {
+			// The fixture's MATIC balance on the proxy is 0; production may
+			// accumulate legacy MATIC dust from auto-claim rewards before
+			// the sunset commit point. Force a non-zero MATIC balance via
+			// the MATIC token's storage and confirm sweep moves it.
+			const fx = await loadFixture(deployFixture);
+			const { maticX, maticXAddress, manager, matic, custody } = fx;
+			await pauseRecallAndFinalize(fx);
+			await time.increase(CUSTODY_DELAY + 1n);
+
+			const maticAddr = await matic.getAddress();
+			const dust = ethers.parseUnits("123", 18);
+			const balancesSlot = await findMappingSlot(
+				maticAddr,
+				maticXAddress,
+				async () => matic.balanceOf(maticXAddress),
+				123456789n
+			);
+			await writeMappingValue(
+				maticAddr,
+				balancesSlot,
+				maticXAddress,
+				dust
+			);
+			expect(await matic.balanceOf(maticXAddress)).to.equal(dust);
+
+			const maticBeforeCustody = await matic.balanceOf(custody.address);
+			await (maticX.connect(manager) as MaticX).sweepToCustody(
+				custody.address
+			);
+			expect(await matic.balanceOf(maticXAddress)).to.equal(0n);
+			expect(await matic.balanceOf(custody.address)).to.equal(
+				maticBeforeCustody + dust
+			);
+		});
 	});
 
 	describe("Access control", function () {
@@ -847,6 +1127,243 @@ describe("MaticX sunset", function () {
 					await fxStateRootTunnel.getAddress()
 				)
 			).to.be.revertedWithCustomError(maticX, "RecallAlreadyInitiated");
+		});
+	});
+
+	describe("Oracle three-tier behavior", function () {
+		it("pre-recall: serves the live computed rate from validator stakes", async function () {
+			const { maticX } = await loadFixture(deployFixture);
+			// Before any recall flag flips, the read path goes through
+			// totalSupply() / getTotalStakeAcrossAllValidators().
+			const supply = await maticX.totalSupply();
+			const [polFor1e18, returnedSupply, returnedPooled] =
+				await maticX.convertMaticXToPOL(TERMINAL_RATE_PRECISION);
+			// The 2nd/3rd return values mirror the legacy computation
+			// (totalShares / totalPooled), not TERMINAL_RATE_PRECISION.
+			expect(returnedSupply).to.equal(supply);
+			expect(returnedPooled).to.be.gt(0n);
+			expect(polFor1e18).to.be.gt(0n);
+		});
+
+		it("during recall: preFinalizeRate matches the pre-recall live rate exactly", async function () {
+			const { maticX, manager } = await loadFixture(deployFixture);
+
+			// Capture the live rate one block before bulkUnstake, then
+			// confirm the snapshot equals it.
+			const [liveRateBefore] = await maticX.convertMaticXToPOL(
+				TERMINAL_RATE_PRECISION
+			);
+
+			await (maticX.connect(manager) as MaticX).togglePause();
+			await (
+				maticX.connect(manager) as MaticX
+			).bulkUnstakeAllValidators();
+
+			const snap = await maticX.preFinalizeRate();
+			expect(snap).to.equal(liveRateBefore);
+		});
+
+		it("post-finalize: serves the locked terminalRate (3rd tier)", async function () {
+			const fx = await loadFixture(deployFixture);
+			const { maticX } = fx;
+			await pauseRecallAndFinalize(fx);
+
+			const terminal = await maticX.terminalRate();
+			expect(terminal).to.be.gt(0n);
+
+			const [polFor1e18, retPrecision, retRate] =
+				await maticX.convertMaticXToPOL(TERMINAL_RATE_PRECISION);
+			// Post-finalize the return signature returns
+			// (balanceInPOL, TERMINAL_RATE_PRECISION, terminalRate).
+			expect(retPrecision).to.equal(TERMINAL_RATE_PRECISION);
+			expect(retRate).to.equal(terminal);
+			expect(polFor1e18).to.equal(terminal);
+		});
+
+		it("convertPOLToMaticX mirrors the 3-tier oracle (during recall + post-finalize)", async function () {
+			const { maticX, manager } = await loadFixture(deployFixture);
+
+			// Pre-recall — live path, non-zero result.
+			const [livePre] = await maticX.convertPOLToMaticX(
+				TERMINAL_RATE_PRECISION
+			);
+			expect(livePre).to.be.gt(0n);
+
+			await (maticX.connect(manager) as MaticX).togglePause();
+			await (
+				maticX.connect(manager) as MaticX
+			).bulkUnstakeAllValidators();
+
+			// During recall — must be the inverse of preFinalizeRate.
+			const snap = await maticX.preFinalizeRate();
+			const [maticXOutDuringRecall, , rateDuringRecall] =
+				await maticX.convertPOLToMaticX(TERMINAL_RATE_PRECISION);
+			expect(rateDuringRecall).to.equal(snap);
+			expect(maticXOutDuringRecall).to.equal(
+				(TERMINAL_RATE_PRECISION * TERMINAL_RATE_PRECISION) / snap
+			);
+		});
+
+		it("POL donations during recall do NOT move the oracle (manipulation immunity)", async function () {
+			const fx = await loadFixture(deployFixture);
+			const { maticX, manager, pol, stakerA } = fx;
+
+			await (maticX.connect(manager) as MaticX).togglePause();
+			await (
+				maticX.connect(manager) as MaticX
+			).bulkUnstakeAllValidators();
+
+			const snapBefore = await maticX.preFinalizeRate();
+			const [oracleBefore] = await maticX.convertMaticXToPOL(
+				TERMINAL_RATE_PRECISION
+			);
+			expect(oracleBefore).to.equal(snapBefore);
+
+			// Donor sends POL straight to the proxy. Under the legacy live
+			// computation this would have inflated the rate. The snapshot
+			// path must ignore the donation.
+			//
+			// stakerA was funded with stakeAmount*3 in the fixture and has
+			// stakeAmount*2 left after submitPOL. Donate stakeAmount (100 POL).
+			const donation = stakeAmount;
+			expect(await pol.balanceOf(stakerA.address)).to.be.gte(donation);
+			await pol
+				.connect(stakerA)
+				.transfer(await maticX.getAddress(), donation);
+
+			const [oracleAfter] = await maticX.convertMaticXToPOL(
+				TERMINAL_RATE_PRECISION
+			);
+			expect(oracleAfter).to.equal(oracleBefore);
+			expect(await maticX.preFinalizeRate()).to.equal(snapBefore);
+		});
+
+		it("POL donations post-finalize do NOT move the oracle either", async function () {
+			const fx = await loadFixture(deployFixture);
+			const { maticX, pol, stakerA } = fx;
+			await pauseRecallAndFinalize(fx);
+
+			const terminalBefore = await maticX.terminalRate();
+			const [oracleBefore] = await maticX.convertMaticXToPOL(
+				TERMINAL_RATE_PRECISION
+			);
+			expect(oracleBefore).to.equal(terminalBefore);
+
+			const donation = stakeAmount;
+			expect(await pol.balanceOf(stakerA.address)).to.be.gte(donation);
+			await pol
+				.connect(stakerA)
+				.transfer(await maticX.getAddress(), donation);
+
+			const [oracleAfter] = await maticX.convertMaticXToPOL(
+				TERMINAL_RATE_PRECISION
+			);
+			expect(oracleAfter).to.equal(oracleBefore);
+			expect(await maticX.terminalRate()).to.equal(terminalBefore);
+		});
+
+		it("during-recall sentinel: rate==1 when preFinalizeRate is 0", async function () {
+			// Force preFinalizeRate == 0 via storage manipulation post-bulkUnstake.
+			// Oracle must return rate = 1 (sentinel for "rate not snapshotable yet")
+			// instead of dividing by zero.
+			const fx = await loadFixture(deployFixture);
+			const { maticX, maticXAddress, manager } = fx;
+			await (maticX.connect(manager) as MaticX).togglePause();
+			await (
+				maticX.connect(manager) as MaticX
+			).bulkUnstakeAllValidators();
+
+			const before = await maticX.preFinalizeRate();
+			expect(before).to.be.gt(0n);
+			const slot = await findScalarStorageSlot(
+				maticXAddress,
+				before,
+				() => maticX.preFinalizeRate(),
+				123456789n
+			);
+			await setStorageAt(maticXAddress, slot, 0n);
+			expect(await maticX.preFinalizeRate()).to.equal(0n);
+
+			const [, retPrecision, retRate] = await maticX.convertMaticXToPOL(
+				TERMINAL_RATE_PRECISION
+			);
+			expect(retPrecision).to.equal(TERMINAL_RATE_PRECISION);
+			expect(retRate).to.equal(1n);
+		});
+
+		it("post-finalize sentinel: rate==1 when terminalRate is 0", async function () {
+			// Defensive: if terminalRate were somehow 0 post-finalize, oracle
+			// must still return a safe `rate = 1` instead of dividing by zero.
+			const fx = await loadFixture(deployFixture);
+			const { maticX, maticXAddress } = fx;
+			await pauseRecallAndFinalize(fx);
+
+			const before = await maticX.terminalRate();
+			expect(before).to.be.gt(0n);
+			const slot = await findScalarStorageSlot(
+				maticXAddress,
+				before,
+				() => maticX.terminalRate(),
+				123456789n
+			);
+			await setStorageAt(maticXAddress, slot, 0n);
+			expect(await maticX.terminalRate()).to.equal(0n);
+
+			const [, retPrecision, retRate] = await maticX.convertMaticXToPOL(
+				TERMINAL_RATE_PRECISION
+			);
+			expect(retPrecision).to.equal(TERMINAL_RATE_PRECISION);
+			expect(retRate).to.equal(1n);
+		});
+	});
+
+	describe("ValidatorAlreadyRecalled defensive guard", function () {
+		it("fires when assetRecallNonces[vs] != 0 on entry (storage-forged)", async function () {
+			// The guard at `if (assetRecallNonces[vs] != 0) revert
+			// ValidatorAlreadyRecalled()` lives inside `if (stake > 0)`.
+			// Under any reachable state via the public API, the first
+			// bulkUnstake sells the full voucher BEFORE recording the nonce,
+			// so the guard is unreachable in production. It exists purely
+			// as defense-in-depth.
+			//
+			// To prove the guard wires up: locate the assetRecallNonces
+			// mapping slot, plant a non-zero nonce for the preferred
+			// validator (which still has stake > 0), then call bulkUnstake.
+			// recallInitiated is still false, so RecallAlreadyInitiated does
+			// NOT short-circuit; control reaches the inner guard and reverts.
+			const fx = await loadFixture(deployFixture);
+			const { maticX, maticXAddress, manager, stakeManager } = fx;
+			await (maticX.connect(manager) as MaticX).togglePause();
+
+			const [preferredId] =
+				await fx.validatorRegistry.getValidators();
+			const preferredShare =
+				await stakeManager.getValidatorContract(preferredId);
+
+			// Find the slot index of `mapping(address => uint256) public
+			// assetRecallNonces` by probing for a slot whose value at
+			// keccak256(abi.encode(preferredShare, S)) round-trips through
+			// `await maticX.assetRecallNonces(preferredShare)`.
+			const mappingSlot = await findMappingSlot(
+				maticXAddress,
+				preferredShare,
+				async () => maticX.assetRecallNonces(preferredShare),
+				42n
+			);
+			await writeMappingValue(
+				maticXAddress,
+				mappingSlot,
+				preferredShare,
+				42n
+			);
+			expect(
+				await maticX.assetRecallNonces(preferredShare)
+			).to.equal(42n);
+			expect(await maticX.recallInitiated()).to.equal(false);
+
+			await expect(
+				(maticX.connect(manager) as MaticX).bulkUnstakeAllValidators()
+			).to.be.revertedWithCustomError(maticX, "ValidatorAlreadyRecalled");
 		});
 	});
 });
