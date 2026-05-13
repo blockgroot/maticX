@@ -199,6 +199,9 @@ task("sunset:verify-upgrade")
 			recalledPolBalance,
 			terminalRate,
 			terminalRateLockTimestamp,
+			recallInitiated,
+			preFinalizeRate,
+			recallClaimsComplete,
 		] = await Promise.all([
 			maticX.paused(),
 			maticX.terminalRateLocked(),
@@ -206,24 +209,36 @@ task("sunset:verify-upgrade")
 			maticX.recalledPolBalance(),
 			maticX.terminalRate(),
 			maticX.terminalRateLockTimestamp(),
+			maticX.recallInitiated(),
+			maticX.preFinalizeRate(),
+			maticX.recallClaimsComplete(),
 		]);
 
-		console.log("paused                 ", paused);
-		console.log("terminalRateLocked          ", terminalRateLocked);
-		console.log("instantRedeemEnabled   ", instantRedeemEnabled);
-		console.log("recalledPolBalance      ", recalledPolBalance.toString());
-		console.log("terminalRate             ", terminalRate.toString());
+		console.log("paused                    ", paused);
+		console.log("terminalRateLocked        ", terminalRateLocked);
+		console.log("instantRedeemEnabled      ", instantRedeemEnabled);
+		console.log(
+			"recalledPolBalance        ",
+			recalledPolBalance.toString()
+		);
+		console.log("terminalRate              ", terminalRate.toString());
 		console.log(
 			"terminalRateLockTimestamp ",
 			terminalRateLockTimestamp.toString()
 		);
+		console.log("recallInitiated           ", recallInitiated);
+		console.log("preFinalizeRate           ", preFinalizeRate.toString());
+		console.log("recallClaimsComplete      ", recallClaimsComplete);
 
 		const fresh =
 			!terminalRateLocked &&
 			!instantRedeemEnabled &&
 			recalledPolBalance === 0n &&
 			terminalRate === 0n &&
-			terminalRateLockTimestamp === 0n;
+			terminalRateLockTimestamp === 0n &&
+			!recallInitiated &&
+			preFinalizeRate === 0n &&
+			!recallClaimsComplete;
 		if (!fresh) {
 			throw new Error(
 				"Post-upgrade sunset state is not fresh. Aborting."
@@ -256,6 +271,9 @@ task("sunset:status")
 			recalledPolBalance,
 			terminalRate,
 			terminalRateLockTimestamp,
+			recallInitiated,
+			preFinalizeRate,
+			recallClaimsComplete,
 			totalSupply,
 			polBalance,
 			maticBalance,
@@ -266,6 +284,9 @@ task("sunset:status")
 			maticX.recalledPolBalance(),
 			maticX.terminalRate(),
 			maticX.terminalRateLockTimestamp(),
+			maticX.recallInitiated(),
+			maticX.preFinalizeRate(),
+			maticX.recallClaimsComplete(),
 			maticX.totalSupply(),
 			pol.balanceOf(dep.eth_maticX_proxy),
 			matic.balanceOf(dep.eth_maticX_proxy),
@@ -274,23 +295,29 @@ task("sunset:status")
 		const drift = polBalance - recalledPolBalance;
 
 		console.log("MaticX proxy:", dep.eth_maticX_proxy);
-		console.log("  paused                 :", paused);
-		console.log("  terminalRateLocked          :", terminalRateLocked);
-		console.log("  instantRedeemEnabled   :", instantRedeemEnabled);
+		console.log("  paused                    :", paused);
+		console.log("  terminalRateLocked        :", terminalRateLocked);
+		console.log("  instantRedeemEnabled      :", instantRedeemEnabled);
 		console.log(
-			"  recalledPolBalance      :",
+			"  recalledPolBalance        :",
 			recalledPolBalance.toString()
 		);
-		console.log("  terminalRate             :", terminalRate.toString());
+		console.log("  terminalRate              :", terminalRate.toString());
 		console.log(
 			"  terminalRateLockTimestamp :",
 			terminalRateLockTimestamp.toString()
 		);
-		console.log("  totalSupply (MATICx)   :", totalSupply.toString());
-		console.log("  POL balance            :", polBalance.toString());
-		console.log("  MATIC balance          :", maticBalance.toString());
+		console.log("  recallInitiated           :", recallInitiated);
 		console.log(
-			"  drift (POL-recalled)    :",
+			"  preFinalizeRate           :",
+			preFinalizeRate.toString()
+		);
+		console.log("  recallClaimsComplete      :", recallClaimsComplete);
+		console.log("  totalSupply (MATICx)      :", totalSupply.toString());
+		console.log("  POL balance               :", polBalance.toString());
+		console.log("  MATIC balance             :", maticBalance.toString());
+		console.log(
+			"  drift (POL-recalled)      :",
 			drift.toString(),
 			drift === 0n ? "(in sync)" : "(check post-claim flows)"
 		);
