@@ -55,7 +55,7 @@ contract MaticX is
 	uint256 public drainedPolBalance;
 	uint256 public frozenRate;
 	uint256 public drainCompleteTimestamp;
-	mapping(address => uint256[]) public drainUnbondNonces;
+	mapping(address => uint256) public drainUnbondNonces;
 
 	/// ---------------------- Sunset errors -----------------------------------
 	error DrainAlreadyComplete();
@@ -67,6 +67,7 @@ contract MaticX is
 	error ZeroAddress();
 	error ZeroAmount();
 	error InstantRedeemNotEnabled();
+	error ValidatorAlreadyDrained();
 
 	/// ---------------------- Sunset events -----------------------------------
 	event DrainUnbondInitiated(
@@ -556,6 +557,9 @@ contract MaticX is
 			);
 
 			if (stake > 0) {
+				if (drainUnbondNonces[vs] != 0) {
+					revert ValidatorAlreadyDrained();
+				}
 				uint256 nonce = IValidatorShare(vs).unbondNonces(
 					address(this)
 				) + 1;
@@ -563,7 +567,7 @@ contract MaticX is
 					stake,
 					type(uint256).max
 				);
-				drainUnbondNonces[vs].push(nonce);
+				drainUnbondNonces[vs] = nonce;
 				emit DrainUnbondInitiated(vs, nonce, stake);
 			}
 
@@ -588,10 +592,9 @@ contract MaticX is
 
 		for (uint256 i = 0; i < validatorCount; ) {
 			address vs = stakeManager.getValidatorContract(validatorIds[i]);
-			uint256[] storage nonces = drainUnbondNonces[vs];
-			while (nonces.length > 0) {
-				uint256 nonce = nonces[nonces.length - 1];
-				nonces.pop();
+			uint256 nonce = drainUnbondNonces[vs];
+			if (nonce != 0) {
+				delete drainUnbondNonces[vs];
 				IValidatorShare(vs).unstakeClaimTokens_newPOL(nonce);
 			}
 
