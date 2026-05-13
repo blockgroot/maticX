@@ -325,22 +325,17 @@ describe("MaticX sunset", function () {
 				.to.emit(maticX, "InstantRedeemToggled")
 				.withArgs(manager.address, true);
 
-			// 8. Staker A instant-claims half their shares
+			// 8. Staker A instant-claims their full position
 			const stakerAShares = await maticX.balanceOf(stakerA.address);
-			const burnAmount = stakerAShares / 2n;
 			const expectedPol =
-				(burnAmount * expectedRate) / TERMINAL_RATE_PRECISION;
+				(stakerAShares * expectedRate) / TERMINAL_RATE_PRECISION;
 
 			const recalledBefore = await maticX.recalledPolBalance();
-			await expect(
-				(maticX.connect(stakerA) as MaticX).instantClaim(burnAmount)
-			)
+			await expect((maticX.connect(stakerA) as MaticX).instantClaim())
 				.to.emit(maticX, "InstantClaimed")
-				.withArgs(stakerA.address, burnAmount, expectedPol);
+				.withArgs(stakerA.address, stakerAShares, expectedPol);
 
-			expect(await maticX.balanceOf(stakerA.address)).to.equal(
-				stakerAShares - burnAmount
-			);
+			expect(await maticX.balanceOf(stakerA.address)).to.equal(0n);
 			expect(await maticX.recalledPolBalance()).to.equal(
 				recalledBefore - expectedPol
 			);
@@ -408,10 +403,9 @@ describe("MaticX sunset", function () {
 				(maticX.connect(manager) as MaticX).setFeePercent(100)
 			).to.be.revertedWith("Pausable: paused");
 
-			// instantClaim still works
-			const shares = await maticX.balanceOf(stakerA.address);
+			// instantClaim still works (always redeems caller's full balance)
 			await expect(
-				(maticX.connect(stakerA) as MaticX).instantClaim(shares / 10n)
+				(maticX.connect(stakerA) as MaticX).instantClaim()
 			).to.emit(maticX, "InstantClaimed");
 
 			void pol;
@@ -787,48 +781,49 @@ describe("MaticX sunset", function () {
 			const { maticX, stakerA } = fx;
 			await pauseRecallAndFinalize(fx);
 			await expect(
-				(maticX.connect(stakerA) as MaticX).instantClaim(stakeAmount)
+				(maticX.connect(stakerA) as MaticX).instantClaim()
 			).to.be.revertedWithCustomError(maticX, "InstantRedeemNotEnabled");
 		});
 
-		it("reverts on zero amount", async function () {
+		it("reverts ZeroAmount when caller holds no MATICx", async function () {
 			const fx = await loadFixture(deployFixture);
-			const { maticX, stakerA } = fx;
+			const { maticX, attacker } = fx;
 			await freezeAndEnable(fx);
+			expect(await maticX.balanceOf(attacker.address)).to.equal(0n);
 			await expect(
-				(maticX.connect(stakerA) as MaticX).instantClaim(0)
+				(maticX.connect(attacker) as MaticX).instantClaim()
 			).to.be.revertedWithCustomError(maticX, "ZeroAmount");
 		});
 
-		it("reverts AmountInPolZero on dust amount that rounds to zero POL", async function () {
+		it("reverts AmountInPolZero when terminalRate is degenerate (defensive)", async function () {
 			const fx = await loadFixture(deployFixture);
 			const { maticX, maticXAddress, stakerA } = fx;
 			await freezeAndEnable(fx);
 
-			// The live fork rate can be >= 1e18, making non-zero dust claims
-			// payable. Force a tiny terminal rate so the defensive branch is
-			// exercised deterministically.
+			// `finalizeTerminalRate` guarantees `terminalRate > 0` whenever
+			// `polBalance > 0` and `supply > 0`. Force it to 0 via storage to
+			// exercise the defensive branch that catches a degenerate rate.
 			const rateSlot = await findScalarStorageSlot(
 				maticXAddress,
 				await maticX.terminalRate(),
 				() => maticX.terminalRate(),
 				123456789n
 			);
-			await setStorageAt(maticXAddress, rateSlot, 1n);
-			expect(await maticX.terminalRate()).to.equal(1n);
+			await setStorageAt(maticXAddress, rateSlot, 0n);
+			expect(await maticX.terminalRate()).to.equal(0n);
 
 			await expect(
-				(maticX.connect(stakerA) as MaticX).instantClaim(1)
+				(maticX.connect(stakerA) as MaticX).instantClaim()
 			).to.be.revertedWithCustomError(maticX, "AmountInPolZero");
 		});
 
-		it("reverts InsufficientRecalledBalance when amount exceeds pool", async function () {
+		it("reverts InsufficientRecalledBalance when the pool is below the payout", async function () {
 			const fx = await loadFixture(deployFixture);
 			const { maticX, maticXAddress, stakerA } = fx;
 			await freezeAndEnable(fx);
 
 			// Normal accounting makes over-claim unreachable. Force the stored
-			// pool lower after freeze to exercise the defensive guard.
+			// pool to zero after freeze to exercise the defensive guard.
 			const recalledSlot = await findScalarStorageSlot(
 				maticXAddress,
 				await maticX.recalledPolBalance(),
@@ -839,16 +834,14 @@ describe("MaticX sunset", function () {
 			expect(await maticX.recalledPolBalance()).to.equal(0n);
 
 			await expect(
-				(maticX.connect(stakerA) as MaticX).instantClaim(
-					await maticX.balanceOf(stakerA.address)
-				)
+				(maticX.connect(stakerA) as MaticX).instantClaim()
 			).to.be.revertedWithCustomError(
 				maticX,
 				"InsufficientRecalledBalance"
 			);
 		});
 
-		it("burns shares, decrements recalledPolBalance, and transfers POL", async function () {
+		it("redeems the caller's full balance and zeroes their shares", async function () {
 			const fx = await loadFixture(deployFixture);
 			const { maticX, pol, stakerA } = fx;
 			await freezeAndEnable(fx);
@@ -857,21 +850,31 @@ describe("MaticX sunset", function () {
 			const sharesBefore = await maticX.balanceOf(stakerA.address);
 			const recalledBefore = await maticX.recalledPolBalance();
 			const polBefore = await pol.balanceOf(stakerA.address);
+			const expectedPol = (sharesBefore * rate) / TERMINAL_RATE_PRECISION;
 
-			const burn = sharesBefore / 4n;
-			const expectedPol = (burn * rate) / TERMINAL_RATE_PRECISION;
+			await (maticX.connect(stakerA) as MaticX).instantClaim();
 
-			await (maticX.connect(stakerA) as MaticX).instantClaim(burn);
-
-			expect(await maticX.balanceOf(stakerA.address)).to.equal(
-				sharesBefore - burn
-			);
+			expect(await maticX.balanceOf(stakerA.address)).to.equal(0n);
 			expect(await maticX.recalledPolBalance()).to.equal(
 				recalledBefore - expectedPol
 			);
 			expect(await pol.balanceOf(stakerA.address)).to.equal(
 				polBefore + expectedPol
 			);
+		});
+
+		it("emits InstantClaimed with the caller's full balance", async function () {
+			const fx = await loadFixture(deployFixture);
+			const { maticX, stakerA } = fx;
+			await freezeAndEnable(fx);
+
+			const rate = await maticX.terminalRate();
+			const shares = await maticX.balanceOf(stakerA.address);
+			const expectedPol = (shares * rate) / TERMINAL_RATE_PRECISION;
+
+			await expect((maticX.connect(stakerA) as MaticX).instantClaim())
+				.to.emit(maticX, "InstantClaimed")
+				.withArgs(stakerA.address, shares, expectedPol);
 		});
 	});
 

@@ -682,25 +682,29 @@ contract MaticX is
 		emit InstantRedeemToggled(msg.sender, _enabled);
 	}
 
-	/// @notice Burns MATICx shares and sends the user POL at the terminal rate.
+	/// @notice Burns the caller's entire MATICx balance and sends them POL at
+	/// the terminal rate. No amount argument — there is exactly one redemption
+	/// path post-sunset and it always exits the caller in full. Reverts with
+	/// `ZeroAmount` if the caller holds no MATICx.
 	/// Intentionally not gated by `whenNotPaused`.
-	/// @param _amountInMaticX - Amount of MATICx shares to burn
-	function instantClaim(uint256 _amountInMaticX) external nonReentrant {
+	function instantClaim() external nonReentrant {
 		if (!instantRedeemEnabled) revert InstantRedeemNotEnabled();
-		if (_amountInMaticX == 0) revert ZeroAmount();
 
-		uint256 amountInPol = (_amountInMaticX * terminalRate) /
+		uint256 amountInMaticX = balanceOf(msg.sender);
+		if (amountInMaticX == 0) revert ZeroAmount();
+
+		uint256 amountInPol = (amountInMaticX * terminalRate) /
 			TERMINAL_RATE_PRECISION;
 		if (amountInPol == 0) revert AmountInPolZero();
 		if (recalledPolBalance < amountInPol) {
 			revert InsufficientRecalledBalance();
 		}
 
-		_burn(msg.sender, _amountInMaticX);
+		_burn(msg.sender, amountInMaticX);
 		recalledPolBalance -= amountInPol;
 		polToken.safeTransfer(msg.sender, amountInPol);
 
-		emit InstantClaimed(msg.sender, _amountInMaticX, amountInPol);
+		emit InstantClaimed(msg.sender, amountInMaticX, amountInPol);
 	}
 
 	/// @notice After `CUSTODY_DELAY` elapses post-freeze, sweeps the full POL

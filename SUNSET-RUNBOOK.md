@@ -25,7 +25,7 @@ signer, calldata source, preconditions, postconditions.
 |---|---|
 | MaticX proxy | `0xf03A7Eb46d01d9EcAA104558C732Cf82f6B6B645` |
 | MaticX current impl | `0x5a78f4BD60C92FCbbf1C941Bc1136491D2896b35` |
-| MaticX sunset impl | `0x2FeaC44BaeB5E5c68A752b75cb9C690001AFAa5e` |
+| MaticX sunset impl | TBD |
 | ProxyAdmin | `0x6CBd89A4919E39Ad4c7718B04443CC1722B2cB2A` |
 | Timelock | `0x20Ea6f63de406040E1e4B67aD98E84A0Eb3778Be` |
 | StakeManager | `0x5e3Ef299fDDf15eAa0432E6e66473ace8c13D908` |
@@ -100,7 +100,7 @@ Source of truth: `mainnet-deployment-info.json`.
 |---|---|
 | Target | Timelock `0x20Ea6f63de406040E1e4B67aD98E84A0Eb3778Be` |
 | Function | `schedule(address target, uint256 value, bytes data, bytes32 predecessor, bytes32 salt, uint256 delay)` |
-| Inputs | `target` = `0x6CBd89A4919E39Ad4c7718B04443CC1722B2cB2A`<br>`value` = `0`<br>`data` = ProxyAdmin `upgrade(0xf03A7Eb…6B645, 0x2FeaC44…aAa5e)` calldata<br>`predecessor` = `0x0000…0000`<br>`salt` = `keccak256("MATICX_SUNSET_V2_UPGRADE")`<br>`delay` = `86400` |
+| Inputs | `target` = `0x6CBd89A4919E39Ad4c7718B04443CC1722B2cB2A`<br>`value` = `0`<br>`data` = ProxyAdmin `upgrade(0xf03A7Eb…6B645, TBD)` calldata<br>`predecessor` = `0x0000…0000`<br>`salt` = `keccak256("MATICX_SUNSET_V2_UPGRADE")`<br>`delay` = `86400` |
 | Signer | Timelock `PROPOSER_ROLE` |
 | Calldata | `npx hardhat sunset:encode-upgrade --timelock 0x20Ea6f63de406040E1e4B67aD98E84A0Eb3778Be --network ethereum` |
 | Preconditions | Pre-flight passed |
@@ -117,7 +117,7 @@ Source of truth: `mainnet-deployment-info.json`.
 | Signer | Timelock `EXECUTOR_ROLE` |
 | Calldata | Same task as step 1a; second printed payload |
 | Preconditions | `Timelock.isOperationReady(id) == true` |
-| Postconditions | `ProxyAdmin.Upgraded(0x2FeaC44…aAa5e)`; `npx hardhat sunset:verify-upgrade --network ethereum` reports fresh state |
+| Postconditions | `ProxyAdmin.Upgraded(TBD)`; `npx hardhat sunset:verify-upgrade --network ethereum` reports fresh state |
 
 ### Step 2 — `togglePause()`
 
@@ -203,6 +203,16 @@ Source of truth: `mainnet-deployment-info.json`.
 | Preconditions | `terminalRateLocked == true`; L2 push confirmed |
 | Postconditions | `instantRedeemEnabled == true`; `InstantRedeemToggled(admin, true)` |
 | Emergency disable | `setInstantRedeemEnabled(false)` — calldata `0xc9e6f05b00…0000` |
+
+### Step 9 — User redemption window
+
+| | |
+|---|---|
+| Target | — (no admin action) |
+| User path | `MaticX.instantClaim()` — no args. Burns the caller's entire MATICx balance and pays `balance * terminalRate / 1e18` POL. Reverts with `ZeroAmount` for callers with no MATICx. |
+| Selector | `0x660c92d4` |
+| Monitor | `recalledPolBalance` (monotonic decreasing); drift `POL.balanceOf(MaticX) - recalledPolBalance ≈ 0` |
+| Emergency lever | `setInstantRedeemEnabled(false)` |
 
 ### Optional Step — `sweepToCustody(custody)` *(Execute few years after enabling instant redeem)*
 
