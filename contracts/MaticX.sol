@@ -773,6 +773,7 @@ contract MaticX is
 	function setValidatorRegistry(
 		address _validatorRegistry
 	) external override onlyRole(DEFAULT_ADMIN_ROLE) {
+		if (recallInitiated) revert RecallAlreadyInitiated();
 		require(
 			_validatorRegistry != address(0),
 			"Zero validator registry address"
@@ -787,6 +788,7 @@ contract MaticX is
 	function setFxStateRootTunnel(
 		address _fxStateRootTunnel
 	) external override onlyRole(DEFAULT_ADMIN_ROLE) {
+		if (recallInitiated) revert RecallAlreadyInitiated();
 		require(
 			_fxStateRootTunnel != address(0),
 			"Zero fx state root tunnel address"
