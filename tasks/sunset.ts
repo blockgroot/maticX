@@ -198,7 +198,7 @@ task("sunset:verify-upgrade")
 			instantRedeemEnabled,
 			recalledPolBalance,
 			terminalRate,
-			terminalRateLockTimestamp,
+			sweepToCustodyTimestamp,
 			recallInitiated,
 			preFinalizeRate,
 			recallClaimsComplete,
@@ -208,7 +208,7 @@ task("sunset:verify-upgrade")
 			maticX.instantRedeemEnabled(),
 			maticX.recalledPolBalance(),
 			maticX.terminalRate(),
-			maticX.terminalRateLockTimestamp(),
+			maticX.sweepToCustodyTimestamp(),
 			maticX.recallInitiated(),
 			maticX.preFinalizeRate(),
 			maticX.recallClaimsComplete(),
@@ -223,8 +223,8 @@ task("sunset:verify-upgrade")
 		);
 		console.log("terminalRate              ", terminalRate.toString());
 		console.log(
-			"terminalRateLockTimestamp ",
-			terminalRateLockTimestamp.toString()
+			"sweepToCustodyTimestamp    ",
+			sweepToCustodyTimestamp.toString()
 		);
 		console.log("recallInitiated           ", recallInitiated);
 		console.log("preFinalizeRate           ", preFinalizeRate.toString());
@@ -235,7 +235,7 @@ task("sunset:verify-upgrade")
 			!instantRedeemEnabled &&
 			recalledPolBalance === 0n &&
 			terminalRate === 0n &&
-			terminalRateLockTimestamp === 0n &&
+			sweepToCustodyTimestamp === 0n &&
 			!recallInitiated &&
 			preFinalizeRate === 0n &&
 			!recallClaimsComplete;
@@ -270,7 +270,7 @@ task("sunset:status")
 			instantRedeemEnabled,
 			recalledPolBalance,
 			terminalRate,
-			terminalRateLockTimestamp,
+			sweepToCustodyTimestamp,
 			recallInitiated,
 			preFinalizeRate,
 			recallClaimsComplete,
@@ -283,7 +283,7 @@ task("sunset:status")
 			maticX.instantRedeemEnabled(),
 			maticX.recalledPolBalance(),
 			maticX.terminalRate(),
-			maticX.terminalRateLockTimestamp(),
+			maticX.sweepToCustodyTimestamp(),
 			maticX.recallInitiated(),
 			maticX.preFinalizeRate(),
 			maticX.recallClaimsComplete(),
@@ -304,8 +304,8 @@ task("sunset:status")
 		);
 		console.log("  terminalRate              :", terminalRate.toString());
 		console.log(
-			"  terminalRateLockTimestamp :",
-			terminalRateLockTimestamp.toString()
+			"  sweepToCustodyTimestamp    :",
+			sweepToCustodyTimestamp.toString()
 		);
 		console.log("  recallInitiated           :", recallInitiated);
 		console.log(

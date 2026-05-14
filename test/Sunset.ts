@@ -118,6 +118,8 @@ describe("MaticX sunset", function () {
 		await (maticX.connect(manager) as MaticX).initializeV2(
 			await pol.getAddress()
 		);
+		// Fixture pre-configures the sweep window: setCustodyDelay stores
+		// `block.timestamp + CUSTODY_DELAY` as sweepToCustodyTimestamp.
 		await (maticX.connect(manager) as MaticX).setCustodyDelay(
 			CUSTODY_DELAY
 		);
@@ -804,8 +806,11 @@ describe("MaticX sunset", function () {
 			await freezeAndEnable(fx);
 
 			// `finalizeTerminalRate` guarantees `terminalRate > 0` whenever
-			// `polBalance > 0` and `supply > 0`. Force it to 0 via storage to
-			// exercise the defensive branch that catches a degenerate rate.
+			// `polBalance > 0` and `supply > 0`. Force it to 0 via storage so
+			// `_convertMaticXToPOL` falls through to the sentinel `rate = 1`
+			// branch. Then shrink the holder's MATICx balance below
+			// `TERMINAL_RATE_PRECISION` so `(balance * 1) / 1e18` floors to
+			// zero and triggers the AmountInPolZero guard.
 			const rateSlot = await findScalarStorageSlot(
 				maticXAddress,
 				await maticX.terminalRate(),
@@ -814,6 +819,21 @@ describe("MaticX sunset", function () {
 			);
 			await setStorageAt(maticXAddress, rateSlot, 0n);
 			expect(await maticX.terminalRate()).to.equal(0n);
+
+			const balanceSlot = await findMappingSlot(
+				maticXAddress,
+				stakerA.address,
+				() => maticX.balanceOf(stakerA.address),
+				123456789n
+			);
+			// 1 wei MATICx; with sentinel rate=1: 1 * 1 / 1e18 = 0.
+			await writeMappingValue(
+				maticXAddress,
+				balanceSlot,
+				stakerA.address,
+				1n
+			);
+			expect(await maticX.balanceOf(stakerA.address)).to.equal(1n);
 
 			await expect(
 				(maticX.connect(stakerA) as MaticX).instantClaim()
@@ -937,16 +957,16 @@ describe("MaticX sunset", function () {
 			);
 		});
 
-		it("succeeds at the exact CUSTODY_DELAY boundary (< vs <= check)", async function () {
-			// Contract uses `block.timestamp < terminalRateLockTimestamp + CUSTODY_DELAY`
-			// so at exactly that timestamp the condition is false and sweep
+		it("succeeds at the exact sweepToCustodyTimestamp boundary (< vs <= check)", async function () {
+			// Contract uses `block.timestamp < sweepToCustodyTimestamp` so
+			// at exactly that timestamp the condition is false and sweep
 			// must succeed. Guards against off-by-one regressions.
 			const fx = await loadFixture(deployFixture);
 			const { maticX, manager, custody } = fx;
 			await pauseRecallAndFinalize(fx);
 
-			const lockTs = await maticX.terminalRateLockTimestamp();
-			await time.increaseTo(lockTs + CUSTODY_DELAY);
+			const sweepTs = await maticX.sweepToCustodyTimestamp();
+			await time.increaseTo(sweepTs);
 			await expect(
 				(maticX.connect(manager) as MaticX).sweepToCustody(
 					custody.address
@@ -1323,51 +1343,55 @@ describe("MaticX sunset", function () {
 		});
 	});
 
-	describe("custodyDelay (configurable)", function () {
-		it("setCustodyDelay updates the value and emits SetCustodyDelay", async function () {
+	describe("setCustodyDelay (sweep window setter)", function () {
+		it("updates sweepToCustodyTimestamp = block.timestamp + _custodyDelay and emits the absolute value", async function () {
 			const { maticX, manager } = await loadFixture(deployFixture);
 			const newDelay = 7n * 24n * 60n * 60n; // 7 days
-			await expect(
-				(maticX.connect(manager) as MaticX).setCustodyDelay(newDelay)
-			)
+			const tx = await (
+				maticX.connect(manager) as MaticX
+			).setCustodyDelay(newDelay);
+			const block = await ethers.provider.getBlock(tx.blockNumber!);
+			const expectedTs = BigInt(block!.timestamp) + newDelay;
+			await expect(tx)
 				.to.emit(maticX, "SetCustodyDelay")
-				.withArgs(newDelay);
-			expect(await maticX.custodyDelay()).to.equal(newDelay);
+				.withArgs(expectedTs);
+			expect(await maticX.sweepToCustodyTimestamp()).to.equal(
+				expectedTs
+			);
 		});
 
-		it("setCustodyDelay reverts on zero", async function () {
+		it("reverts with ZeroAmount on zero delay", async function () {
 			const { maticX, manager } = await loadFixture(deployFixture);
 			await expect(
 				(maticX.connect(manager) as MaticX).setCustodyDelay(0)
-			).to.be.revertedWith("Zero custody delay");
+			).to.be.revertedWithCustomError(maticX, "ZeroAmount");
 		});
 
-		it("setCustodyDelay reverts for non-admin", async function () {
+		it("reverts for non-admin", async function () {
 			const { maticX, attacker } = await loadFixture(deployFixture);
 			await expect(
 				(maticX.connect(attacker) as MaticX).setCustodyDelay(1n)
 			).to.be.reverted;
 		});
 
-		it("finalizeTerminalRate reverts when custodyDelay is unset", async function () {
-			// Deploy a proxy WITHOUT the fixture's setCustodyDelay call so
-			// custodyDelay stays 0 going into finalize. Mirrors the
-			// production footgun: admin upgrades but forgets to set the delay
-			// before finalizing.
+		it("finalizeTerminalRate reverts when sweepToCustodyTimestamp is in the past (footgun guard)", async function () {
+			// Force sweepToCustodyTimestamp to 0 via storage manipulation so
+			// we don't have to rebuild the fixture. Models the production
+			// footgun: admin upgrades but forgets to set a delay before
+			// finalizing, OR a previously-set delay has already elapsed by
+			// the time finalize runs.
+			const fx = await loadFixture(deployFixture);
 			const { maticX, manager, stakeManager, stakeManagerGovernance } =
-				await loadFixture(deployFixture);
+				fx;
 
-			// Reset custodyDelay back to zero via storage manipulation so we
-			// don't have to rebuild the fixture. We only need it zero at the
-			// moment finalizeTerminalRate runs.
 			const slot = await findScalarStorageSlot(
 				await maticX.getAddress(),
-				CUSTODY_DELAY,
-				() => maticX.custodyDelay(),
+				await maticX.sweepToCustodyTimestamp(),
+				() => maticX.sweepToCustodyTimestamp(),
 				123456789n
 			);
 			await setStorageAt(await maticX.getAddress(), slot, 0n);
-			expect(await maticX.custodyDelay()).to.equal(0n);
+			expect(await maticX.sweepToCustodyTimestamp()).to.equal(0n);
 
 			await (maticX.connect(manager) as MaticX).togglePause();
 			await (
@@ -1379,12 +1403,14 @@ describe("MaticX sunset", function () {
 			).claimAssetRecallNonces();
 			await expect(
 				(maticX.connect(manager) as MaticX).finalizeTerminalRate()
-			).to.be.revertedWith("Custody delay not set");
+			).to.be.revertedWith("Sweep timestamp not in future");
 		});
 
-		it("sweepToCustody respects an admin-shortened custodyDelay", async function () {
-			// Admin shrinks the delay; sweep must succeed at the new (shorter)
-			// boundary instead of the original 3-year default.
+		it("sweepToCustody respects an admin-shortened delay (post-finalize reconfig)", async function () {
+			// Admin shrinks the delay post-finalize. setCustodyDelay
+			// recomputes sweepToCustodyTimestamp = now + shortDelay, so the
+			// new anchor is the moment of the reconfiguration. Sweep must
+			// wait the full shortDelay from that moment.
 			const fx = await loadFixture(deployFixture);
 			const { maticX, manager, custody } = fx;
 			await pauseRecallAndFinalize(fx);
@@ -1393,8 +1419,8 @@ describe("MaticX sunset", function () {
 			await (maticX.connect(manager) as MaticX).setCustodyDelay(
 				shortDelay
 			);
+			const sweepTs = await maticX.sweepToCustodyTimestamp();
 
-			const lockTs = await maticX.terminalRateLockTimestamp();
 			// Below the new boundary -> revert.
 			await expect(
 				(maticX.connect(manager) as MaticX).sweepToCustody(
@@ -1403,7 +1429,7 @@ describe("MaticX sunset", function () {
 			).to.be.revertedWithCustomError(maticX, "CustodyDelayNotElapsed");
 
 			// At/after the new boundary -> success.
-			await time.increaseTo(lockTs + shortDelay);
+			await time.increaseTo(sweepTs);
 			await expect(
 				(maticX.connect(manager) as MaticX).sweepToCustody(
 					custody.address
@@ -1411,32 +1437,37 @@ describe("MaticX sunset", function () {
 			).to.emit(maticX, "SweptToCustody");
 		});
 
-		it("sweepToCustody respects an admin-extended custodyDelay", async function () {
+		it("sweepToCustody respects an admin-extended delay (reconfig restarts the clock)", async function () {
 			// Admin extends delay AFTER the original 3-year window passes.
-			// sweep should now revert again until the extended window elapses.
+			// Because setCustodyDelay computes `now + delay`, the new
+			// sweepToCustodyTimestamp is anchored to the reconfig moment
+			// — sweep must wait the full extendedDelay from that point.
 			const fx = await loadFixture(deployFixture);
 			const { maticX, manager, custody } = fx;
 			await pauseRecallAndFinalize(fx);
 
-			const lockTs = await maticX.terminalRateLockTimestamp();
-			// Advance past the original 3-year delay so the old gate would
-			// have opened. Then extend the delay to 5 years from lockTs.
-			await time.increaseTo(lockTs + CUSTODY_DELAY + 100n);
+			const originalSweepTs =
+				await maticX.sweepToCustodyTimestamp();
+			// Advance past the original 3-year window so the old gate would
+			// have opened.
+			await time.increaseTo(originalSweepTs + 100n);
+
 			const extendedDelay = 5n * 365n * 24n * 60n * 60n;
 			await (maticX.connect(manager) as MaticX).setCustodyDelay(
 				extendedDelay
 			);
 
-			// We're at lockTs + 3y + 100s; gate now uses lockTs + 5y.
-			// Should revert because 3y + 100s < 5y.
+			// New anchor: now + 5y; sweep should revert until that point.
+			const newSweepTs = await maticX.sweepToCustodyTimestamp();
+			expect(newSweepTs).to.be.gt(originalSweepTs);
 			await expect(
 				(maticX.connect(manager) as MaticX).sweepToCustody(
 					custody.address
 				)
 			).to.be.revertedWithCustomError(maticX, "CustodyDelayNotElapsed");
 
-			// Advance to lockTs + 5y exactly -> succeeds.
-			await time.increaseTo(lockTs + extendedDelay);
+			// Advance to the new boundary exactly -> succeeds.
+			await time.increaseTo(newSweepTs);
 			await expect(
 				(maticX.connect(manager) as MaticX).sweepToCustody(
 					custody.address

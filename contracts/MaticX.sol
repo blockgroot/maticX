@@ -53,12 +53,15 @@ contract MaticX is
 	bool public instantRedeemEnabled;
 	uint256 public recalledPolBalance;
 	uint256 public terminalRate;
-	uint256 public terminalRateLockTimestamp;
+	/// @dev Absolute timestamp at which `sweepToCustody` becomes callable.
+	/// The admin sets the precomputed `now + delay` directly; the setter
+	/// requires the value to be strictly in the future, so admin cannot
+	/// short-circuit an existing window.
+	uint256 public sweepToCustodyTimestamp;
 	mapping(address => uint256) public assetRecallNonces;
 	bool public recallInitiated;
 	uint256 public preFinalizeRate;
 	bool public recallClaimsComplete;
-	uint256 public custodyDelay;
 
 	/// ---------------------- Sunset errors -----------------------------------
 	error TerminalRateAlreadyLocked();
@@ -101,7 +104,7 @@ contract MaticX is
 		uint256 polAmount,
 		uint256 maticAmount
 	);
-	event SetCustodyDelay(uint256 newCustodyDelay);
+	event SetCustodyDelay(uint256 newSweepToCustodyTimestamp);
 
 	/// ------------------------------ Modifiers -------------------------------
 
@@ -603,7 +606,7 @@ contract MaticX is
 	/// claim so the txn can be retried if some unbonds are not yet matured.
 	/// Precondition: admin waited full unbond period after
 	/// `bulkUnstakeAllValidators`. Any residual non-POL token (e.g. legacy
-	/// MATIC dust) is swept raw via `sweepToCustody` after `custodyDelay`.
+	/// MATIC dust) is swept raw via `sweepToCustody` after `sweepToCustodyTimestamp`.
 	function claimAssetRecallNonces() external onlyRole(DEFAULT_ADMIN_ROLE) {
 		require(paused(), "Pause first");
 		if (!recallInitiated) revert RecallNotInitiated();
@@ -641,11 +644,15 @@ contract MaticX is
 	/// is computed from POL balance only).
 	function finalizeTerminalRate() external onlyRole(DEFAULT_ADMIN_ROLE) {
 		require(paused(), "Pause first");
-		// Note: custodyDelay must be set BEFORE finalize, otherwise the
-		// post-finalize sweep gate (`block.timestamp < lockTs + custodyDelay`)
-		// trivially passes and POL is sweepable immediately. Catches the
-		// "admin forgot setCustodyDelay" operational footgun.
-		require(custodyDelay > 0, "Custody delay not set");
+		// Note: sweepToCustodyTimestamp must be set to a future moment
+		// BEFORE finalize. Otherwise the sweep gate
+		// (`block.timestamp < sweepToCustodyTimestamp`) trivially passes
+		// and POL is sweepable immediately. Catches the "admin forgot to
+		// configure the sweep window" operational footgun.
+		require(
+			sweepToCustodyTimestamp > block.timestamp,
+			"Sweep timestamp not in future"
+		);
 		if (terminalRateLocked) revert TerminalRateAlreadyLocked();
 		if (!recallClaimsComplete) revert RecallClaimsNotComplete();
 
@@ -656,7 +663,6 @@ contract MaticX is
 		terminalRate = (polBalance * TERMINAL_RATE_PRECISION) / supply;
 		recalledPolBalance = polBalance;
 		terminalRateLocked = true;
-		terminalRateLockTimestamp = block.timestamp;
 
 		emit AssetRecallCompleted(polBalance, supply, terminalRate);
 	}
@@ -695,8 +701,7 @@ contract MaticX is
 		uint256 amountInMaticX = balanceOf(msg.sender);
 		if (amountInMaticX == 0) revert ZeroAmount();
 
-		uint256 amountInPol = (amountInMaticX * terminalRate) /
-			TERMINAL_RATE_PRECISION;
+		(uint256 amountInPol, , ) = _convertMaticXToPOL(amountInMaticX);
 		if (amountInPol == 0) revert AmountInPolZero();
 		if (recalledPolBalance < amountInPol) {
 			revert InsufficientRecalledBalance();
@@ -709,7 +714,7 @@ contract MaticX is
 		emit InstantClaimed(msg.sender, amountInMaticX, amountInPol);
 	}
 
-	/// @notice After `custodyDelay` elapses post-freeze, sweeps the full POL
+	/// @notice After `sweepToCustodyTimestamp` is reached, sweeps the full POL
 	/// and MATIC balance to the given custody address. Intended for
 	/// long-tail residue handover.
 	/// @param _custody - Address to receive the swept tokens
@@ -717,7 +722,7 @@ contract MaticX is
 		address _custody
 	) external nonReentrant onlyRole(DEFAULT_ADMIN_ROLE) {
 		if (!terminalRateLocked) revert TerminalRateNotLocked();
-		if (block.timestamp < terminalRateLockTimestamp + custodyDelay) {
+		if (block.timestamp < sweepToCustodyTimestamp) {
 			revert CustodyDelayNotElapsed();
 		}
 		if (_custody == address(0)) revert ZeroAddress();
@@ -774,16 +779,17 @@ contract MaticX is
 		emit SetTreasury(_treasury);
 	}
 
-	/// @notice Updates the custody delay (seconds between
-	/// `finalizeTerminalRate` and the earliest allowed `sweepToCustody`).
-	/// Reverts on zero so the sweep gate is never trivially passable.
-	/// @param _custodyDelay - New custody delay in seconds
+	/// @notice Sets the sweep window by recomputing `sweepToCustodyTimestamp
+	/// = block.timestamp + _custodyDelay`. Reverts on zero delay. Each
+	/// call overwrites the prior value, so any reconfiguration restarts
+	/// the clock from now (bnbX-consistent safety property).
+	/// @param _custodyDelay - Seconds from now until sweep becomes callable
 	function setCustodyDelay(
 		uint256 _custodyDelay
 	) external onlyRole(DEFAULT_ADMIN_ROLE) {
-		require(_custodyDelay > 0, "Zero custody delay");
-		custodyDelay = _custodyDelay;
-		emit SetCustodyDelay(_custodyDelay);
+		if (_custodyDelay == 0) revert ZeroAmount();
+		sweepToCustodyTimestamp = block.timestamp + _custodyDelay;
+		emit SetCustodyDelay(sweepToCustodyTimestamp);
 	}
 
 	/// @notice Sets the address of the validator registry.
