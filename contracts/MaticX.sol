@@ -776,7 +776,7 @@ contract MaticX is
 	/// @notice Sets the sweep window by recomputing `sweepToCustodyTimestamp
 	/// = block.timestamp + _custodyDelay`. Reverts on zero delay. Each
 	/// call overwrites the prior value, so any reconfiguration restarts
-	/// the clock from now (bnbX-consistent safety property).
+	/// the clock from now
 	/// @param _custodyDelay - Seconds from now until sweep becomes callable
 	function setCustodyDelay(
 		uint256 _custodyDelay
