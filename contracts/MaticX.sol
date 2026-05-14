@@ -644,15 +644,6 @@ contract MaticX is
 	/// is computed from POL balance only).
 	function finalizeTerminalRate() external onlyRole(DEFAULT_ADMIN_ROLE) {
 		require(paused(), "Pause first");
-		// Note: sweepToCustodyTimestamp must be set to a future moment
-		// BEFORE finalize. Otherwise the sweep gate
-		// (`block.timestamp < sweepToCustodyTimestamp`) trivially passes
-		// and POL is sweepable immediately. Catches the "admin forgot to
-		// configure the sweep window" operational footgun.
-		require(
-			sweepToCustodyTimestamp > block.timestamp,
-			"Sweep timestamp not in future"
-		);
 		if (terminalRateLocked) revert TerminalRateAlreadyLocked();
 		if (!recallClaimsComplete) revert RecallClaimsNotComplete();
 
@@ -722,7 +713,10 @@ contract MaticX is
 		address _custody
 	) external nonReentrant onlyRole(DEFAULT_ADMIN_ROLE) {
 		if (!terminalRateLocked) revert TerminalRateNotLocked();
-		if (block.timestamp < sweepToCustodyTimestamp) {
+		if (
+			sweepToCustodyTimestamp == 0 ||
+			block.timestamp < sweepToCustodyTimestamp
+		) {
 			revert CustodyDelayNotElapsed();
 		}
 		if (_custody == address(0)) revert ZeroAddress();

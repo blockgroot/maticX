@@ -1374,15 +1374,15 @@ describe("MaticX sunset", function () {
 			).to.be.reverted;
 		});
 
-		it("finalizeTerminalRate reverts when sweepToCustodyTimestamp is in the past (footgun guard)", async function () {
-			// Force sweepToCustodyTimestamp to 0 via storage manipulation so
-			// we don't have to rebuild the fixture. Models the production
-			// footgun: admin upgrades but forgets to set a delay before
-			// finalizing, OR a previously-set delay has already elapsed by
-			// the time finalize runs.
+		it("sweepToCustody reverts when sweepToCustodyTimestamp is unset (footgun guard)", async function () {
+			// Models the production footgun: admin reaches finalize without
+			// ever calling setCustodyDelay (or storage corruption leaves it
+			// at 0). The finalize path no longer gates on this; the gate
+			// lives at sweep time. Force sweepToCustodyTimestamp to 0 via
+			// storage so we don't have to rebuild the fixture.
 			const fx = await loadFixture(deployFixture);
-			const { maticX, manager, stakeManager, stakeManagerGovernance } =
-				fx;
+			const { maticX, manager, custody } = fx;
+			await pauseRecallAndFinalize(fx);
 
 			const slot = await findScalarStorageSlot(
 				await maticX.getAddress(),
@@ -1393,17 +1393,11 @@ describe("MaticX sunset", function () {
 			await setStorageAt(await maticX.getAddress(), slot, 0n);
 			expect(await maticX.sweepToCustodyTimestamp()).to.equal(0n);
 
-			await (maticX.connect(manager) as MaticX).togglePause();
-			await (
-				maticX.connect(manager) as MaticX
-			).bulkUnstakeAllValidators();
-			await advanceUnbond(stakeManager, stakeManagerGovernance);
-			await (
-				maticX.connect(manager) as MaticX
-			).claimAssetRecallNonces();
 			await expect(
-				(maticX.connect(manager) as MaticX).finalizeTerminalRate()
-			).to.be.revertedWith("Sweep timestamp not in future");
+				(maticX.connect(manager) as MaticX).sweepToCustody(
+					custody.address
+				)
+			).to.be.revertedWithCustomError(maticX, "CustodyDelayNotElapsed");
 		});
 
 		it("sweepToCustody respects an admin-shortened delay (post-finalize reconfig)", async function () {
