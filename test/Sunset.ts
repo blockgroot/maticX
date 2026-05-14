@@ -1323,56 +1323,6 @@ describe("MaticX sunset", function () {
 		});
 	});
 
-	describe("ValidatorAlreadyRecalled defensive guard", function () {
-		it("fires when assetRecallNonces[vs] != 0 on entry (storage-forged)", async function () {
-			// The guard at `if (assetRecallNonces[vs] != 0) revert
-			// ValidatorAlreadyRecalled()` lives inside `if (stake > 0)`.
-			// Under any reachable state via the public API, the first
-			// bulkUnstake sells the full voucher BEFORE recording the nonce,
-			// so the guard is unreachable in production. It exists purely
-			// as defense-in-depth.
-			//
-			// To prove the guard wires up: locate the assetRecallNonces
-			// mapping slot, plant a non-zero nonce for the preferred
-			// validator (which still has stake > 0), then call bulkUnstake.
-			// recallInitiated is still false, so RecallAlreadyInitiated does
-			// NOT short-circuit; control reaches the inner guard and reverts.
-			const fx = await loadFixture(deployFixture);
-			const { maticX, maticXAddress, manager, stakeManager } = fx;
-			await (maticX.connect(manager) as MaticX).togglePause();
-
-			const [preferredId] =
-				await fx.validatorRegistry.getValidators();
-			const preferredShare =
-				await stakeManager.getValidatorContract(preferredId);
-
-			// Find the slot index of `mapping(address => uint256) public
-			// assetRecallNonces` by probing for a slot whose value at
-			// keccak256(abi.encode(preferredShare, S)) round-trips through
-			// `await maticX.assetRecallNonces(preferredShare)`.
-			const mappingSlot = await findMappingSlot(
-				maticXAddress,
-				preferredShare,
-				async () => maticX.assetRecallNonces(preferredShare),
-				42n
-			);
-			await writeMappingValue(
-				maticXAddress,
-				mappingSlot,
-				preferredShare,
-				42n
-			);
-			expect(
-				await maticX.assetRecallNonces(preferredShare)
-			).to.equal(42n);
-			expect(await maticX.recallInitiated()).to.equal(false);
-
-			await expect(
-				(maticX.connect(manager) as MaticX).bulkUnstakeAllValidators()
-			).to.be.revertedWithCustomError(maticX, "ValidatorAlreadyRecalled");
-		});
-	});
-
 	describe("custodyDelay (configurable)", function () {
 		it("setCustodyDelay updates the value and emits SetCustodyDelay", async function () {
 			const { maticX, manager } = await loadFixture(deployFixture);

@@ -70,7 +70,6 @@ contract MaticX is
 	error ZeroAddress();
 	error ZeroAmount();
 	error InstantRedeemNotEnabled();
-	error ValidatorAlreadyRecalled();
 	error UnpauseLockedAfterRecall();
 	error RecallAlreadyInitiated();
 	error RecallNotInitiated();
@@ -582,9 +581,6 @@ contract MaticX is
 			);
 
 			if (stake > 0) {
-				if (assetRecallNonces[vs] != 0) {
-					revert ValidatorAlreadyRecalled();
-				}
 				uint256 nonce = IValidatorShare(vs).unbondNonces(
 					address(this)
 				) + 1;
