@@ -1360,11 +1360,11 @@ describe("MaticX sunset", function () {
 			);
 		});
 
-		it("reverts with ZeroAmount on zero delay", async function () {
+		it("reverts with ZeroCustodyDelay on zero delay", async function () {
 			const { maticX, manager } = await loadFixture(deployFixture);
 			await expect(
 				(maticX.connect(manager) as MaticX).setCustodyDelay(0)
-			).to.be.revertedWithCustomError(maticX, "ZeroAmount");
+			).to.be.revertedWithCustomError(maticX, "ZeroCustodyDelay");
 		});
 
 		it("reverts for non-admin", async function () {

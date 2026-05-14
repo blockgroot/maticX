@@ -77,6 +77,7 @@ contract MaticX is
 	error RecallAlreadyInitiated();
 	error RecallNotInitiated();
 	error RecallClaimsNotComplete();
+	error ZeroCustodyDelay();
 
 	/// ---------------------- Sunset events -----------------------------------
 	event AssetRecallInitiated(
@@ -781,7 +782,7 @@ contract MaticX is
 	function setCustodyDelay(
 		uint256 _custodyDelay
 	) external onlyRole(DEFAULT_ADMIN_ROLE) {
-		if (_custodyDelay == 0) revert ZeroAmount();
+		if (_custodyDelay == 0) revert ZeroCustodyDelay();
 		sweepToCustodyTimestamp = block.timestamp + _custodyDelay;
 		emit SetCustodyDelay(sweepToCustodyTimestamp);
 	}
