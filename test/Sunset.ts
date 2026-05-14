@@ -118,6 +118,9 @@ describe("MaticX sunset", function () {
 		await (maticX.connect(manager) as MaticX).initializeV2(
 			await pol.getAddress()
 		);
+		await (maticX.connect(manager) as MaticX).setCustodyDelay(
+			CUSTODY_DELAY
+		);
 		await (maticX.connect(manager) as MaticX).setFxStateRootTunnel(
 			await fxStateRootTunnel.getAddress()
 		);
@@ -1367,6 +1370,128 @@ describe("MaticX sunset", function () {
 			await expect(
 				(maticX.connect(manager) as MaticX).bulkUnstakeAllValidators()
 			).to.be.revertedWithCustomError(maticX, "ValidatorAlreadyRecalled");
+		});
+	});
+
+	describe("custodyDelay (configurable)", function () {
+		it("setCustodyDelay updates the value and emits SetCustodyDelay", async function () {
+			const { maticX, manager } = await loadFixture(deployFixture);
+			const newDelay = 7n * 24n * 60n * 60n; // 7 days
+			await expect(
+				(maticX.connect(manager) as MaticX).setCustodyDelay(newDelay)
+			)
+				.to.emit(maticX, "SetCustodyDelay")
+				.withArgs(newDelay);
+			expect(await maticX.custodyDelay()).to.equal(newDelay);
+		});
+
+		it("setCustodyDelay reverts on zero", async function () {
+			const { maticX, manager } = await loadFixture(deployFixture);
+			await expect(
+				(maticX.connect(manager) as MaticX).setCustodyDelay(0)
+			).to.be.revertedWith("Zero custody delay");
+		});
+
+		it("setCustodyDelay reverts for non-admin", async function () {
+			const { maticX, attacker } = await loadFixture(deployFixture);
+			await expect(
+				(maticX.connect(attacker) as MaticX).setCustodyDelay(1n)
+			).to.be.reverted;
+		});
+
+		it("finalizeTerminalRate reverts when custodyDelay is unset", async function () {
+			// Deploy a proxy WITHOUT the fixture's setCustodyDelay call so
+			// custodyDelay stays 0 going into finalize. Mirrors the
+			// production footgun: admin upgrades but forgets to set the delay
+			// before finalizing.
+			const { maticX, manager, stakeManager, stakeManagerGovernance } =
+				await loadFixture(deployFixture);
+
+			// Reset custodyDelay back to zero via storage manipulation so we
+			// don't have to rebuild the fixture. We only need it zero at the
+			// moment finalizeTerminalRate runs.
+			const slot = await findScalarStorageSlot(
+				await maticX.getAddress(),
+				CUSTODY_DELAY,
+				() => maticX.custodyDelay(),
+				123456789n
+			);
+			await setStorageAt(await maticX.getAddress(), slot, 0n);
+			expect(await maticX.custodyDelay()).to.equal(0n);
+
+			await (maticX.connect(manager) as MaticX).togglePause();
+			await (
+				maticX.connect(manager) as MaticX
+			).bulkUnstakeAllValidators();
+			await advanceUnbond(stakeManager, stakeManagerGovernance);
+			await (
+				maticX.connect(manager) as MaticX
+			).claimAssetRecallNonces();
+			await expect(
+				(maticX.connect(manager) as MaticX).finalizeTerminalRate()
+			).to.be.revertedWith("Custody delay not set");
+		});
+
+		it("sweepToCustody respects an admin-shortened custodyDelay", async function () {
+			// Admin shrinks the delay; sweep must succeed at the new (shorter)
+			// boundary instead of the original 3-year default.
+			const fx = await loadFixture(deployFixture);
+			const { maticX, manager, custody } = fx;
+			await pauseRecallAndFinalize(fx);
+
+			const shortDelay = 60n * 60n; // 1 hour
+			await (maticX.connect(manager) as MaticX).setCustodyDelay(
+				shortDelay
+			);
+
+			const lockTs = await maticX.terminalRateLockTimestamp();
+			// Below the new boundary -> revert.
+			await expect(
+				(maticX.connect(manager) as MaticX).sweepToCustody(
+					custody.address
+				)
+			).to.be.revertedWithCustomError(maticX, "CustodyDelayNotElapsed");
+
+			// At/after the new boundary -> success.
+			await time.increaseTo(lockTs + shortDelay);
+			await expect(
+				(maticX.connect(manager) as MaticX).sweepToCustody(
+					custody.address
+				)
+			).to.emit(maticX, "SweptToCustody");
+		});
+
+		it("sweepToCustody respects an admin-extended custodyDelay", async function () {
+			// Admin extends delay AFTER the original 3-year window passes.
+			// sweep should now revert again until the extended window elapses.
+			const fx = await loadFixture(deployFixture);
+			const { maticX, manager, custody } = fx;
+			await pauseRecallAndFinalize(fx);
+
+			const lockTs = await maticX.terminalRateLockTimestamp();
+			// Advance past the original 3-year delay so the old gate would
+			// have opened. Then extend the delay to 5 years from lockTs.
+			await time.increaseTo(lockTs + CUSTODY_DELAY + 100n);
+			const extendedDelay = 5n * 365n * 24n * 60n * 60n;
+			await (maticX.connect(manager) as MaticX).setCustodyDelay(
+				extendedDelay
+			);
+
+			// We're at lockTs + 3y + 100s; gate now uses lockTs + 5y.
+			// Should revert because 3y + 100s < 5y.
+			await expect(
+				(maticX.connect(manager) as MaticX).sweepToCustody(
+					custody.address
+				)
+			).to.be.revertedWithCustomError(maticX, "CustodyDelayNotElapsed");
+
+			// Advance to lockTs + 5y exactly -> succeeds.
+			await time.increaseTo(lockTs + extendedDelay);
+			await expect(
+				(maticX.connect(manager) as MaticX).sweepToCustody(
+					custody.address
+				)
+			).to.emit(maticX, "SweptToCustody");
 		});
 	});
 });

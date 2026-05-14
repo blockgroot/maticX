@@ -46,10 +46,10 @@ Source of truth: `mainnet-deployment-info.json`.
 | `T - 2d` | Step 0b (verify implementation on Etherscan) |
 | `T - 1d` | Pre-flight checklist passed |
 | `T` | Step 1a (Timelock schedule) |
-| `T + 24h` | Step 1b (Timelock execute) → Step 2 → Step 3 |
+| `T + 24h` | Step 1b (Timelock execute) → Step 1c (set custody delay) → Step 2 → Step 3 |
 | `T + ~21d` | Step 5 (claim unbonds) → Step 6 (freeze) → Step 7 → Step 8 |
-| `T + 21d → T + 3y` | User redemption window |
-| `T + 3y` | Step 10 (sweep) |
+| `T + 21d → T + custodyDelay` | User redemption window |
+| `T + custodyDelay` | Step 10 (sweep) — custody delay is admin-configurable |
 
 ---
 
@@ -63,6 +63,7 @@ Source of truth: `mainnet-deployment-info.json`.
 | 4 | Sunset state is fresh (all zero / false) | `npx hardhat sunset:status --network ethereum` |
 | 5 | Contract has live stake to recall | `getTotalStakeAcrossAllValidators() > 0` |
 | 6 | FxStateRootTunnel + L2 ChildPool reachable | Last `MessageSent` processed on L2 |
+| 7 | Custody delay value agreed by signers | Configurable by `setCustodyDelay` |
 
 ---
 
@@ -72,12 +73,13 @@ Source of truth: `mainnet-deployment-info.json`.
 
 | | |
 |---|---|
-| Target | OZ Upgrades plugin (no fixed `to`; CREATE-style deployment) |
+| Target | CREATE-style deployment from the deployer EOA (no fixed `to`) |
 | Function | `npx hardhat sunset:deploy-impl --network ethereum` |
-| Inputs | — (reads `MaticX` factory from `contracts/MaticX.sol`) |
-| Signer | Deployer EOA `0x75db63125A4f04E59A1A2Ab4aCC4FC1Cd5Daddd5` |
-| Preconditions | Local repo on the audited release commit; `MAINNET_RPC_URL` archival; deployer EOA funded (~0.05 ETH) |
-| What it does | (1) `hre.upgrades.validateUpgrade(proxy, MaticX, { kind: "transparent" })` — reverts on storage-layout drift. (2) `hre.upgrades.deployImplementation(MaticX, { kind: "transparent" })` — broadcasts the implementation deployment. (3) Writes `eth_maticX_sunset_impl = <addr>` to `mainnet-deployment-info.json` |
+| Inputs | — (reads `MaticX` factory from `contracts/MaticX.sol`; signer derived from `DEPLOYER_PRIVATE_KEY` env) |
+| Signer | Deployer EOA derived from `DEPLOYER_PRIVATE_KEY` |
+| Preconditions | Local repo on the audited release commit; `ETHEREUM_API_KEY` archival; `DEPLOYER_PRIVATE_KEY` env set; deployer EOA funded (~0.05 ETH) |
+| What it does | (1) Constructs a wallet from `DEPLOYER_PRIVATE_KEY`. (2) `Factory.deploy()` — broadcasts the implementation deployment (raw, bypasses OZ's upgrades plugin manifest since the MaticX proxy was never registered with it). (3) Writes `eth_maticX_sunset_impl = <addr>` to `mainnet-deployment-info.json` |
+| Note on storage-layout safety | Raw deploy skips `validateUpgrade`. The new storage is append-only (every new sunset slot is appended after `reentrancyGuardStatus`), and `test/Sunset.ts` exercises the layout via `upgrades.deployProxy` against a fresh proxy on a mainnet fork. |
 | Postconditions | New implementation contract at the printed address; `eth_maticX_sunset_impl` set; tx hash recorded |
 | Verification | Etherscan shows the new contract at the printed address; matches local bytecode via `npx hardhat verify --network ethereum <addr>` (next step) |
 | Reversible | Yes (re-run with a fresh build to deploy another implementation; the proxy is not touched yet) |
@@ -118,6 +120,20 @@ Source of truth: `mainnet-deployment-info.json`.
 | Calldata | Same task as step 1a; second printed payload |
 | Preconditions | `Timelock.isOperationReady(id) == true` |
 | Postconditions | `ProxyAdmin.Upgraded(TBD)`; `npx hardhat sunset:verify-upgrade --network ethereum` reports fresh state |
+
+### Step 1c — `setCustodyDelay(uint256)`
+
+| | |
+|---|---|
+| Target | MaticX `0xf03A7Eb46d01d9EcAA104558C732Cf82f6B6B645` |
+| Function | `setCustodyDelay(uint256 _custodyDelay)` |
+| Inputs | `_custodyDelay = 94608000` (3 × 365 days, default) |
+| Signer | Manager Safe `0x80A43dd35382C4919991C5Bca7f46Dd24Fde4C67` |
+| Calldata | `cast calldata 'setCustodyDelay(uint256)' 94608000` — yields `0x6b1de86a` + 32-byte uint256 |
+| Preconditions | Upgrade executed (step 1b); `custodyDelay() == 0` |
+| Postconditions | `custodyDelay() == 94608000`; `SetCustodyDelay(94608000)` event |
+| Why it's required | `finalizeTerminalRate` reverts `"Custody delay not set"` if `custodyDelay == 0`, so the recall flow cannot proceed past Step 6 without this. Catches the "admin forgot the delay" footgun. |
+| Reversible | Yes — admin can call `setCustodyDelay(newValue)` any time (must be > 0) |
 
 ### Step 2 — `togglePause()`
 
@@ -175,7 +191,7 @@ Source of truth: `mainnet-deployment-info.json`.
 | Inputs | — |
 | Signer | Manager Safe — full quorum, fresh sign-off |
 | Calldata | `0x6a06a558` |
-| Preconditions | `paused() == true`, `recallInitiated == true`, `recallClaimsComplete == true`, `terminalRateLocked == false`, `POL.balanceOf(MaticX) > 0`, `totalSupply > 0` |
+| Preconditions | `paused() == true`, `recallInitiated == true`, `recallClaimsComplete == true`, `terminalRateLocked == false`, **`custodyDelay > 0`** (set in Step 1c), `POL.balanceOf(MaticX) > 0`, `totalSupply > 0` |
 | Verification before signing | Run `npx hardhat sunset:status --network ethereum`; snapshot output; confirm drift = 0 |
 | Postconditions | `AssetRecallCompleted(polBalance, totalSupply, terminalRate)`; `terminalRateLocked == true`; `terminalRate = polBalance * 1e18 / totalSupply` (exact, within 1 wei); `recalledPolBalance == POL.balanceOf(MaticX)`; `terminalRateLockTimestamp = block.timestamp` |
 
@@ -223,7 +239,7 @@ Source of truth: `mainnet-deployment-info.json`.
 | Inputs | `_custody` = custody Safe (TBD) |
 | Signer | Manager Safe |
 | Calldata | `npx hardhat sunset:encode-step --step sweep --arg <custody> --network ethereum` |
-| Preconditions | `block.timestamp >= terminalRateLockTimestamp + 94_608_000` (3y); `_custody != 0x0` |
+| Preconditions | `block.timestamp >= terminalRateLockTimestamp + custodyDelay` configurable via `setCustodyDelay`; `_custody != 0x0` |
 | Postconditions | `SweptToCustody(custody, polAmount, maticAmount)`; `POL.balanceOf(MaticX) == 0`; `MATIC.balanceOf(MaticX) == 0`; `recalledPolBalance == 0` |
 
 ---
@@ -236,7 +252,7 @@ Source of truth: `mainnet-deployment-info.json`.
 
 - `RPC_PROVIDER` + `ETHEREUM_API_KEY` — archival mainnet RPC, all tasks.
 - `ETHERSCAN_API_KEY` — Step 0b (`hardhat verify`).
-- `DEPLOYER_MNEMONIC` + `DEPLOYER_ADDRESS=0x75db…ddd5` (path `m/44'/60'/0'/0`, EOA funded ~0.05 ETH) — Step 0a only.
+- `DEPLOYER_PRIVATE_KEY` — Step 0a only (passed inline to the deploy script; do not commit). EOA funded ~0.05 ETH.
 
 `encode-*`, `status`, `verify-upgrade` are read-only. Only `sunset:deploy-impl` broadcasts.
 
@@ -252,6 +268,12 @@ npx hardhat sunset:encode-upgrade \
   --timelock 0x20Ea6f63de406040E1e4B67aD98E84A0Eb3778Be \
   --network ethereum
 
+# Step 1c — set custody delay 
+cast calldata 'setCustodyDelay(uint256)' <CUSTODY_DELAY>
+# or, with ethers:
+#   ethers.id("setCustodyDelay(uint256)").slice(0,10) +
+#   ethers.toBeHex(CUSTODY_DELAY, 32).slice(2)
+
 # Steps 2–8
 npx hardhat sunset:encode-step --step pause                  --network ethereum
 npx hardhat sunset:encode-step --step bulk-unstake           --network ethereum
@@ -260,7 +282,7 @@ npx hardhat sunset:encode-step --step freeze                 --network ethereum
 npx hardhat sunset:encode-step --step push-l2                --network ethereum
 npx hardhat sunset:encode-step --step enable-instant-redeem  --network ethereum
 
-# Optional Step 
+# Optional Step
 npx hardhat sunset:encode-step --step sweep --arg <custodyAddress> --network ethereum
 
 # Verification
