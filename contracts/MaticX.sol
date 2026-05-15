@@ -60,7 +60,7 @@ contract MaticX is
 	mapping(address => uint256) public assetRecallNonces;
 	bool public recallInitiated;
 	uint256 public preFinalizeRate;
-	bool public recallClaimsComplete;
+	bool public recallComplete;
 
 	/// ---------------------- Sunset errors -----------------------------------
 	error TerminalRateAlreadyLocked();
@@ -634,7 +634,7 @@ contract MaticX is
 		// Set only after the whole loop completes: if any per-validator
 		// claim reverts (unbond not yet matured), the entire tx reverts
 		// and this flag stays false so the txn can be retried.
-		recallClaimsComplete = true;
+		recallComplete = true;
 	}
 
 	/// @notice Freezes the MATICx -> POL exchange rate using current POL
@@ -645,7 +645,7 @@ contract MaticX is
 	function finalizeTerminalRate() external onlyRole(DEFAULT_ADMIN_ROLE) {
 		require(paused(), "Pause first");
 		if (terminalRateLocked) revert TerminalRateAlreadyLocked();
-		if (!recallClaimsComplete) revert RecallClaimsNotComplete();
+		if (!recallComplete) revert RecallClaimsNotComplete();
 
 		uint256 polBalance = polToken.balanceOf(address(this));
 		uint256 supply = totalSupply();
