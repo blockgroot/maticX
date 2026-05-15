@@ -619,9 +619,9 @@ contract MaticX is
 			address vs = stakeManager.getValidatorContract(validatorIds[i]);
 			uint256 nonce = assetRecallNonces[vs];
 			if (nonce != 0) {
-				// Claim first, then pop: if the validator reverts (e.g.
+				// Claim first, then clear: if the validator reverts (e.g.
 				// unmatured unbond), the whole tx rolls back including
-				// the mapping clear, so the nonce remains for retry.
+				// the mapping delete, so the nonce remains for retry.
 				IValidatorShare(vs).unstakeClaimTokens_newPOL(nonce);
 				delete assetRecallNonces[vs];
 			}
