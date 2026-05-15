@@ -61,6 +61,10 @@ contract MaticX is
 	bool public recallInitiated;
 	uint256 public preFinalizeRate;
 	bool public recallComplete;
+	/// @dev Flips true on the first sweepToCustody call (any asset).
+	/// One-way: once an asset has been moved to custody, instantClaim is
+	/// permanently disabled.
+	bool public assetCustodied;
 
 	/// ---------------------- Sunset errors -----------------------------------
 	error TerminalRateAlreadyLocked();
@@ -78,6 +82,7 @@ contract MaticX is
 	error RecallClaimsNotComplete();
 	error RecallAlreadyComplete();
 	error ZeroCustodyDelay();
+	error AssetCustodied();
 
 	/// ---------------------- Sunset events -----------------------------------
 	event AssetRecallInitiated(
@@ -101,9 +106,9 @@ contract MaticX is
 		uint256 amountInPol
 	);
 	event SweptToCustody(
+		address indexed asset,
 		address indexed custody,
-		uint256 polAmount,
-		uint256 maticAmount
+		uint256 amount
 	);
 	event SetCustodyDelay(uint256 newSweepToCustodyTimestamp);
 
@@ -589,9 +594,7 @@ contract MaticX is
 					stake,
 					type(uint256).max
 				);
-				uint256 nonce = IValidatorShare(vs).unbondNonces(
-					address(this)
-				);
+				uint256 nonce = IValidatorShare(vs).unbondNonces(address(this));
 				assetRecallNonces[vs] = nonce;
 				emit AssetRecallInitiated(vs, nonce, stake);
 			}
@@ -689,6 +692,7 @@ contract MaticX is
 	/// Intentionally not gated by `whenNotPaused`.
 	function instantClaim() external nonReentrant {
 		if (!instantRedeemEnabled) revert InstantRedeemNotEnabled();
+		if (assetCustodied) revert AssetCustodied();
 
 		uint256 amountInMaticX = balanceOf(msg.sender);
 		if (amountInMaticX == 0) revert ZeroAmount();
@@ -705,11 +709,14 @@ contract MaticX is
 		emit InstantClaimed(msg.sender, amountInMaticX, amountInPol);
 	}
 
-	/// @notice After `sweepToCustodyTimestamp` is reached, sweeps the full POL
-	/// and MATIC balance to the given custody address. Intended for
-	/// long-tail residue handover.
+	/// @notice After `sweepToCustodyTimestamp` is reached, sweeps the full
+	/// balance of `_asset` to the given custody address. Intended for
+	/// long-tail residue handover. One-way: the first call (any asset)
+	/// permanently disables instantClaim via `assetCustodied`.
+	/// @param _asset - Token to sweep
 	/// @param _custody - Address to receive the swept tokens
 	function sweepToCustody(
+		address _asset,
 		address _custody
 	) external nonReentrant onlyRole(DEFAULT_ADMIN_ROLE) {
 		if (!terminalRateLocked) revert TerminalRateNotLocked();
@@ -719,15 +726,17 @@ contract MaticX is
 		) {
 			revert CustodyDelayNotElapsed();
 		}
-		if (_custody == address(0)) revert ZeroAddress();
+		if (_asset == address(0) || _custody == address(0)) {
+			revert ZeroAddress();
+		}
 
-		uint256 polBal = polToken.balanceOf(address(this));
-		uint256 maticBal = maticToken.balanceOf(address(this));
+		uint256 bal = IERC20Upgradeable(_asset).balanceOf(address(this));
+		if (bal == 0) revert ZeroAmount();
 
-		if (polBal > 0) polToken.safeTransfer(_custody, polBal);
-		if (maticBal > 0) maticToken.safeTransfer(_custody, maticBal);
+		assetCustodied = true;
+		IERC20Upgradeable(_asset).safeTransfer(_custody, bal);
 
-		emit SweptToCustody(_custody, polBal, maticBal);
+		emit SweptToCustody(_asset, _custody, bal);
 	}
 
 	/// ------------------------------ Setters ---------------------------------
