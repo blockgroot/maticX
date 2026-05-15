@@ -268,11 +268,9 @@ describe("MaticX sunset", function () {
 			// 2. Bulk unstake — assert AssetRecallInitiated event args on the
 			// preferred deposit validator (the only one with stake in this
 			// fresh-proxy fixture).
-			const [preferredId] =
-				await fx.validatorRegistry.getValidators();
-			const preferredShare = await stakeManager.getValidatorContract(
-				preferredId
-			);
+			const [preferredId] = await fx.validatorRegistry.getValidators();
+			const preferredShare =
+				await stakeManager.getValidatorContract(preferredId);
 			const vs = await ethers.getContractAt(
 				[
 					"function getTotalStake(address) view returns (uint256, uint256)",
@@ -284,7 +282,9 @@ describe("MaticX sunset", function () {
 				bigint,
 				bigint,
 			];
-			const nonceBefore = (await vs.unbondNonces(maticXAddress)) as bigint;
+			const nonceBefore = (await vs.unbondNonces(
+				maticXAddress
+			)) as bigint;
 			await expect(
 				(maticX.connect(manager) as MaticX).bulkUnstakeAllValidators()
 			)
@@ -312,7 +312,7 @@ describe("MaticX sunset", function () {
 
 			expect(await maticX.terminalRateLocked()).to.equal(true);
 			expect(await maticX.terminalRate()).to.equal(expectedRate);
-			expect(await maticX.recalledPolBalance()).to.equal(polBalAfter);
+			expect(await pol.balanceOf(maticXAddress)).to.equal(polBalAfter);
 
 			// 6. Push to L2
 			await expect(
@@ -335,20 +335,23 @@ describe("MaticX sunset", function () {
 			const expectedPol =
 				(stakerAShares * expectedRate) / TERMINAL_RATE_PRECISION;
 
-			const recalledBefore = await maticX.recalledPolBalance();
+			const recalledBefore = await pol.balanceOf(maticXAddress);
 			await expect((maticX.connect(stakerA) as MaticX).instantClaim())
 				.to.emit(maticX, "InstantClaimed")
 				.withArgs(stakerA.address, stakerAShares, expectedPol);
 
 			expect(await maticX.balanceOf(stakerA.address)).to.equal(0n);
-			expect(await maticX.recalledPolBalance()).to.equal(
+			expect(await pol.balanceOf(maticXAddress)).to.equal(
 				recalledBefore - expectedPol
 			);
 			expect(await pol.balanceOf(stakerA.address)).to.be.gte(expectedPol);
 
 			// 9. Sweep — must wait the full custody delay
+			const polAddr = await pol.getAddress();
+			const maticAddr = await fx.matic.getAddress();
 			await expect(
 				(maticX.connect(manager) as MaticX).sweepToCustody(
+					polAddr,
 					custody.address
 				)
 			).to.be.revertedWithCustomError(maticX, "CustodyDelayNotElapsed");
@@ -359,17 +362,29 @@ describe("MaticX sunset", function () {
 			const maticBeforeSweep = await fx.matic.balanceOf(maticXAddress);
 			await expect(
 				(maticX.connect(manager) as MaticX).sweepToCustody(
+					polAddr,
 					custody.address
 				)
 			)
 				.to.emit(maticX, "SweptToCustody")
-				.withArgs(custody.address, polBeforeSweep, maticBeforeSweep);
+				.withArgs(polAddr, custody.address, polBeforeSweep);
+
+			if (maticBeforeSweep > 0n) {
+				await expect(
+					(maticX.connect(manager) as MaticX).sweepToCustody(
+						maticAddr,
+						custody.address
+					)
+				)
+					.to.emit(maticX, "SweptToCustody")
+					.withArgs(maticAddr, custody.address, maticBeforeSweep);
+			}
 
 			expect(await pol.balanceOf(maticXAddress)).to.equal(0);
 			expect(await pol.balanceOf(custody.address)).to.equal(
 				polBeforeSweep
 			);
-			expect(await maticX.recalledPolBalance()).to.equal(0);
+			expect(await maticX.assetCustodied()).to.equal(true);
 
 			// Staker B still holds their MATICx but no POL left to redeem
 			void stakerB;
@@ -487,8 +502,9 @@ describe("MaticX sunset", function () {
 				maticX.connect(manager) as MaticX
 			).bulkUnstakeAllValidators();
 			const receipt = await tx.wait();
-			const topic =
-				maticX.interface.getEvent("AssetRecallInitiated")!.topicHash;
+			const event = maticX.interface.getEvent("AssetRecallInitiated");
+			if (!event) throw new Error("AssetRecallInitiated event not found");
+			const topic = event.topicHash;
 			const emitted =
 				receipt?.logs.filter((l) => l.topics[0] === topic).length ?? 0;
 			expect(emitted).to.equal(sharesWithStake.length);
@@ -510,16 +526,16 @@ describe("MaticX sunset", function () {
 			).to.be.revertedWith("Pause first");
 		});
 
-		it("reverts after terminalRateLocked", async function () {
+		it("reverts after recallComplete", async function () {
+			// pauseRecallAndFinalize sets recallComplete = true, and the
+			// `recallComplete` check fires before `terminalRateLocked` in the
+			// function body — so this is the revert we observe.
 			const fx = await loadFixture(deployFixture);
 			const { maticX, manager } = fx;
 			await pauseRecallAndFinalize(fx);
 			await expect(
 				(maticX.connect(manager) as MaticX).claimAssetRecallNonces()
-			).to.be.revertedWithCustomError(
-				maticX,
-				"TerminalRateAlreadyLocked"
-			);
+			).to.be.revertedWithCustomError(maticX, "RecallAlreadyComplete");
 		});
 
 		it("reverts with RecallNotInitiated when called before bulkUnstake", async function () {
@@ -540,12 +556,9 @@ describe("MaticX sunset", function () {
 
 			// Capture per-validator nonces before the failed retry so we
 			// can confirm the tx-level revert rolls them back intact.
-			const validatorIds =
-				await fx.validatorRegistry.getValidators();
+			const validatorIds = await fx.validatorRegistry.getValidators();
 			const shareAddrs = await Promise.all(
-				validatorIds.map((id) =>
-					stakeManager.getValidatorContract(id)
-				)
+				validatorIds.map((id) => stakeManager.getValidatorContract(id))
 			);
 			const noncesBefore = await Promise.all(
 				shareAddrs.map((vs) => maticX.assetRecallNonces(vs))
@@ -562,39 +575,32 @@ describe("MaticX sunset", function () {
 				});
 
 			// Rollback contract: every per-validator nonce is preserved,
-			// and the recallClaimsComplete flag must NOT have been set
+			// and the recallComplete flag must NOT have been set
 			// since the loop never completed.
 			const noncesAfter = await Promise.all(
 				shareAddrs.map((vs) => maticX.assetRecallNonces(vs))
 			);
 			expect(noncesAfter).to.deep.equal(noncesBefore);
-			expect(await maticX.recallClaimsComplete()).to.equal(false);
+			expect(await maticX.recallComplete()).to.equal(false);
 			expect(await maticX.terminalRateLocked()).to.equal(false);
 		});
 
-		it("sets recallClaimsComplete = true after a successful claim", async function () {
+		it("sets recallComplete = true after a successful claim", async function () {
 			const fx = await loadFixture(deployFixture);
-			const {
-				maticX,
-				manager,
-				stakeManager,
-				stakeManagerGovernance,
-			} = fx;
+			const { maticX, manager, stakeManager, stakeManagerGovernance } =
+				fx;
 			await (maticX.connect(manager) as MaticX).togglePause();
 			await (
 				maticX.connect(manager) as MaticX
 			).bulkUnstakeAllValidators();
 			await advanceUnbond(stakeManager, stakeManagerGovernance);
 
-			expect(await maticX.recallClaimsComplete()).to.equal(false);
-			await (
-				maticX.connect(manager) as MaticX
-			).claimAssetRecallNonces();
-			expect(await maticX.recallClaimsComplete()).to.equal(true);
+			expect(await maticX.recallComplete()).to.equal(false);
+			await (maticX.connect(manager) as MaticX).claimAssetRecallNonces();
+			expect(await maticX.recallComplete()).to.equal(true);
 
 			// Every per-validator nonce is cleared post-claim.
-			const validatorIds =
-				await fx.validatorRegistry.getValidators();
+			const validatorIds = await fx.validatorRegistry.getValidators();
 			for (const id of validatorIds) {
 				const vs = await stakeManager.getValidatorContract(id);
 				expect(await maticX.assetRecallNonces(vs)).to.equal(0n);
@@ -651,9 +657,7 @@ describe("MaticX sunset", function () {
 				maticX.connect(manager) as MaticX
 			).bulkUnstakeAllValidators();
 			await advanceUnbond(stakeManager, stakeManagerGovernance);
-			await (
-				maticX.connect(manager) as MaticX
-			).claimAssetRecallNonces();
+			await (maticX.connect(manager) as MaticX).claimAssetRecallNonces();
 
 			const supplyBefore = await maticX.totalSupply();
 			expect(supplyBefore).to.be.gt(0n);
@@ -689,9 +693,7 @@ describe("MaticX sunset", function () {
 				maticX.connect(manager) as MaticX
 			).bulkUnstakeAllValidators();
 			await advanceUnbond(stakeManager, stakeManagerGovernance);
-			await (
-				maticX.connect(manager) as MaticX
-			).claimAssetRecallNonces();
+			await (maticX.connect(manager) as MaticX).claimAssetRecallNonces();
 
 			const polAddr = await pol.getAddress();
 			const before = await pol.balanceOf(maticXAddress);
@@ -702,12 +704,7 @@ describe("MaticX sunset", function () {
 				async () => pol.balanceOf(maticXAddress),
 				123456789n
 			);
-			await writeMappingValue(
-				polAddr,
-				balancesSlot,
-				maticXAddress,
-				0n
-			);
+			await writeMappingValue(polAddr, balancesSlot, maticXAddress, 0n);
 			expect(await pol.balanceOf(maticXAddress)).to.equal(0n);
 
 			await expect(
@@ -842,19 +839,22 @@ describe("MaticX sunset", function () {
 
 		it("reverts InsufficientRecalledBalance when the pool is below the payout", async function () {
 			const fx = await loadFixture(deployFixture);
-			const { maticX, maticXAddress, stakerA } = fx;
+			const { maticX, maticXAddress, pol, stakerA } = fx;
 			await freezeAndEnable(fx);
 
-			// Normal accounting makes over-claim unreachable. Force the stored
-			// pool to zero after freeze to exercise the defensive guard.
-			const recalledSlot = await findScalarStorageSlot(
+			// Normal accounting makes over-claim unreachable. Force the
+			// contract's live POL balance to zero after freeze to exercise
+			// the defensive guard (`polToken.balanceOf(address(this)) <
+			// amountInPol`).
+			const polAddr = await pol.getAddress();
+			const polBalanceSlot = await findMappingSlot(
+				polAddr,
 				maticXAddress,
-				await maticX.recalledPolBalance(),
-				() => maticX.recalledPolBalance(),
+				() => pol.balanceOf(maticXAddress),
 				123456789n
 			);
-			await setStorageAt(maticXAddress, recalledSlot, 0n);
-			expect(await maticX.recalledPolBalance()).to.equal(0n);
+			await writeMappingValue(polAddr, polBalanceSlot, maticXAddress, 0n);
+			expect(await pol.balanceOf(maticXAddress)).to.equal(0n);
 
 			await expect(
 				(maticX.connect(stakerA) as MaticX).instantClaim()
@@ -866,19 +866,19 @@ describe("MaticX sunset", function () {
 
 		it("redeems the caller's full balance and zeroes their shares", async function () {
 			const fx = await loadFixture(deployFixture);
-			const { maticX, pol, stakerA } = fx;
+			const { maticX, maticXAddress, pol, stakerA } = fx;
 			await freezeAndEnable(fx);
 
 			const rate = await maticX.terminalRate();
 			const sharesBefore = await maticX.balanceOf(stakerA.address);
-			const recalledBefore = await maticX.recalledPolBalance();
+			const recalledBefore = await pol.balanceOf(maticXAddress);
 			const polBefore = await pol.balanceOf(stakerA.address);
 			const expectedPol = (sharesBefore * rate) / TERMINAL_RATE_PRECISION;
 
 			await (maticX.connect(stakerA) as MaticX).instantClaim();
 
 			expect(await maticX.balanceOf(stakerA.address)).to.equal(0n);
-			expect(await maticX.recalledPolBalance()).to.equal(
+			expect(await pol.balanceOf(maticXAddress)).to.equal(
 				recalledBefore - expectedPol
 			);
 			expect(await pol.balanceOf(stakerA.address)).to.equal(
@@ -903,10 +903,11 @@ describe("MaticX sunset", function () {
 
 	describe("sweepToCustody", function () {
 		it("reverts before freeze", async function () {
-			const { maticX, manager, custody } =
+			const { maticX, manager, pol, custody } =
 				await loadFixture(deployFixture);
 			await expect(
 				(maticX.connect(manager) as MaticX).sweepToCustody(
+					await pol.getAddress(),
 					custody.address
 				)
 			).to.be.revertedWithCustomError(maticX, "TerminalRateNotLocked");
@@ -914,10 +915,11 @@ describe("MaticX sunset", function () {
 
 		it("reverts before the custody delay elapses", async function () {
 			const fx = await loadFixture(deployFixture);
-			const { maticX, manager, custody } = fx;
+			const { maticX, manager, pol, custody } = fx;
 			await pauseRecallAndFinalize(fx);
 			await expect(
 				(maticX.connect(manager) as MaticX).sweepToCustody(
+					await pol.getAddress(),
 					custody.address
 				)
 			).to.be.revertedWithCustomError(maticX, "CustodyDelayNotElapsed");
@@ -925,36 +927,121 @@ describe("MaticX sunset", function () {
 
 		it("reverts on zero custody address", async function () {
 			const fx = await loadFixture(deployFixture);
-			const { maticX, manager } = fx;
+			const { maticX, manager, pol } = fx;
 			await pauseRecallAndFinalize(fx);
 			await time.increase(CUSTODY_DELAY + 1n);
 			await expect(
 				(maticX.connect(manager) as MaticX).sweepToCustody(
+					await pol.getAddress(),
 					ethers.ZeroAddress
 				)
 			).to.be.revertedWithCustomError(maticX, "ZeroAddress");
 		});
 
-		it("moves the entire POL+MATIC balance and zeroes recalledPolBalance", async function () {
+		it("reverts on zero asset address", async function () {
+			const fx = await loadFixture(deployFixture);
+			const { maticX, manager, custody } = fx;
+			await pauseRecallAndFinalize(fx);
+			await time.increase(CUSTODY_DELAY + 1n);
+			await expect(
+				(maticX.connect(manager) as MaticX).sweepToCustody(
+					ethers.ZeroAddress,
+					custody.address
+				)
+			).to.be.revertedWithCustomError(maticX, "ZeroAddress");
+		});
+
+		it("moves the entire POL+MATIC balance via two per-asset sweeps", async function () {
 			const fx = await loadFixture(deployFixture);
 			const { maticX, maticXAddress, manager, pol, matic, custody } = fx;
 			await pauseRecallAndFinalize(fx);
 			await time.increase(CUSTODY_DELAY + 1n);
 
+			const polAddr = await pol.getAddress();
+			const maticAddr = await matic.getAddress();
 			const polBefore = await pol.balanceOf(maticXAddress);
 			const maticBefore = await matic.balanceOf(maticXAddress);
 
+			await expect(
+				(maticX.connect(manager) as MaticX).sweepToCustody(
+					polAddr,
+					custody.address
+				)
+			)
+				.to.emit(maticX, "SweptToCustody")
+				.withArgs(polAddr, custody.address, polBefore);
+
+			expect(await pol.balanceOf(maticXAddress)).to.equal(0);
+			expect(await pol.balanceOf(custody.address)).to.equal(polBefore);
+
+			// MATIC may legitimately be 0 in this fresh-proxy fixture — only
+			// attempt the second sweep if there's dust to move (the contract
+			// reverts ZeroAmount on an empty balance).
+			if (maticBefore > 0n) {
+				await expect(
+					(maticX.connect(manager) as MaticX).sweepToCustody(
+						maticAddr,
+						custody.address
+					)
+				)
+					.to.emit(maticX, "SweptToCustody")
+					.withArgs(maticAddr, custody.address, maticBefore);
+				expect(await matic.balanceOf(maticXAddress)).to.equal(0);
+				expect(await matic.balanceOf(custody.address)).to.equal(
+					maticBefore
+				);
+			}
+		});
+
+		it("reverts ZeroAmount when the asset balance is zero", async function () {
+			const fx = await loadFixture(deployFixture);
+			const { maticX, manager, matic, custody } = fx;
+			await pauseRecallAndFinalize(fx);
+			await time.increase(CUSTODY_DELAY + 1n);
+
+			// Fresh-proxy fixture has no MATIC balance; sweeping it must
+			// revert ZeroAmount (asset-was-empty footgun guard).
+			await expect(
+				(maticX.connect(manager) as MaticX).sweepToCustody(
+					await matic.getAddress(),
+					custody.address
+				)
+			).to.be.revertedWithCustomError(maticX, "ZeroAmount");
+		});
+
+		it("flips assetCustodied = true on first successful sweep", async function () {
+			const fx = await loadFixture(deployFixture);
+			const { maticX, manager, pol, custody } = fx;
+			await pauseRecallAndFinalize(fx);
+			await time.increase(CUSTODY_DELAY + 1n);
+
+			expect(await maticX.assetCustodied()).to.equal(false);
 			await (maticX.connect(manager) as MaticX).sweepToCustody(
+				await pol.getAddress(),
+				custody.address
+			);
+			expect(await maticX.assetCustodied()).to.equal(true);
+		});
+
+		it("instantClaim reverts with AssetCustodied after a sweep, even with instantRedeemEnabled", async function () {
+			const fx = await loadFixture(deployFixture);
+			const { maticX, manager, pol, stakerA, custody } = fx;
+			await pauseRecallAndFinalize(fx);
+			await (maticX.connect(manager) as MaticX).setInstantRedeemEnabled(
+				true
+			);
+			await time.increase(CUSTODY_DELAY + 1n);
+
+			await (maticX.connect(manager) as MaticX).sweepToCustody(
+				await pol.getAddress(),
 				custody.address
 			);
 
-			expect(await pol.balanceOf(maticXAddress)).to.equal(0);
-			expect(await matic.balanceOf(maticXAddress)).to.equal(0);
-			expect(await maticX.recalledPolBalance()).to.equal(0);
-			expect(await pol.balanceOf(custody.address)).to.equal(polBefore);
-			expect(await matic.balanceOf(custody.address)).to.equal(
-				maticBefore
-			);
+			expect(await maticX.instantRedeemEnabled()).to.equal(true);
+			expect(await maticX.assetCustodied()).to.equal(true);
+			await expect(
+				(maticX.connect(stakerA) as MaticX).instantClaim()
+			).to.be.revertedWithCustomError(maticX, "AssetCustodied");
 		});
 
 		it("succeeds at the exact sweepToCustodyTimestamp boundary (< vs <= check)", async function () {
@@ -962,13 +1049,14 @@ describe("MaticX sunset", function () {
 			// at exactly that timestamp the condition is false and sweep
 			// must succeed. Guards against off-by-one regressions.
 			const fx = await loadFixture(deployFixture);
-			const { maticX, manager, custody } = fx;
+			const { maticX, manager, pol, custody } = fx;
 			await pauseRecallAndFinalize(fx);
 
 			const sweepTs = await maticX.sweepToCustodyTimestamp();
 			await time.increaseTo(sweepTs);
 			await expect(
 				(maticX.connect(manager) as MaticX).sweepToCustody(
+					await pol.getAddress(),
 					custody.address
 				)
 			).to.emit(maticX, "SweptToCustody");
@@ -1001,9 +1089,14 @@ describe("MaticX sunset", function () {
 			expect(await matic.balanceOf(maticXAddress)).to.equal(dust);
 
 			const maticBeforeCustody = await matic.balanceOf(custody.address);
-			await (maticX.connect(manager) as MaticX).sweepToCustody(
-				custody.address
-			);
+			await expect(
+				(maticX.connect(manager) as MaticX).sweepToCustody(
+					maticAddr,
+					custody.address
+				)
+			)
+				.to.emit(maticX, "SweptToCustody")
+				.withArgs(maticAddr, custody.address, dust);
 			expect(await matic.balanceOf(maticXAddress)).to.equal(0n);
 			expect(await matic.balanceOf(custody.address)).to.equal(
 				maticBeforeCustody + dust
@@ -1013,7 +1106,7 @@ describe("MaticX sunset", function () {
 
 	describe("Access control", function () {
 		it("non-admin cannot call any sunset admin function", async function () {
-			const { maticX, attacker, custody } =
+			const { maticX, attacker, pol, custody } =
 				await loadFixture(deployFixture);
 			await expect(
 				(maticX.connect(attacker) as MaticX).bulkUnstakeAllValidators()
@@ -1034,6 +1127,7 @@ describe("MaticX sunset", function () {
 			).to.be.reverted;
 			await expect(
 				(maticX.connect(attacker) as MaticX).sweepToCustody(
+					await pol.getAddress(),
 					custody.address
 				)
 			).to.be.reverted;
@@ -1076,18 +1170,21 @@ describe("MaticX sunset", function () {
 			await (maticX.connect(manager) as MaticX).claimAssetRecallNonces();
 			await (maticX.connect(manager) as MaticX).finalizeTerminalRate();
 
-			// Snapshot recalledPolBalance BEFORE user claim
-			const recalledBefore = await maticX.recalledPolBalance();
+			// Snapshot the contract's live POL balance BEFORE user claim
+			const maticXAddress = await maticX.getAddress();
+			const recalledBefore = await pol.balanceOf(maticXAddress);
 			const polBeforeUser = await pol.balanceOf(stakerA.address);
 
 			// User claims their pre-sunset request — must succeed while paused
 			await (maticX.connect(stakerA) as MaticX).claimWithdrawal(0);
 
-			// User received POL; recalledPolBalance is unaffected (independent pool)
+			// User received POL; the contract's POL pool is unaffected — the
+			// pre-sunset claim path pulls from the stake manager's escrowed
+			// balance, not the contract's reserves.
 			expect(await pol.balanceOf(stakerA.address)).to.be.gt(
 				polBeforeUser
 			);
-			expect(await maticX.recalledPolBalance()).to.equal(recalledBefore);
+			expect(await pol.balanceOf(maticXAddress)).to.equal(recalledBefore);
 		});
 	});
 
@@ -1197,13 +1294,17 @@ describe("MaticX sunset", function () {
 			const terminal = await maticX.terminalRate();
 			expect(terminal).to.be.gt(0n);
 
-			const [polFor1e18, retPrecision, retRate] =
+			// Tuple is (balanceInPOL, totalShares, totalPooled). Asking for
+			// PRECISION shares' worth of POL must equal the locked rate, and
+			// the implied rate (pooled * PRECISION / shares) must also equal
+			// the locked rate — donation-immune.
+			const [polFor1e18, totalShares, totalPooled] =
 				await maticX.convertMaticXToPOL(TERMINAL_RATE_PRECISION);
-			// Post-finalize the return signature returns
-			// (balanceInPOL, TERMINAL_RATE_PRECISION, terminalRate).
-			expect(retPrecision).to.equal(TERMINAL_RATE_PRECISION);
-			expect(retRate).to.equal(terminal);
 			expect(polFor1e18).to.equal(terminal);
+			expect(totalShares).to.be.gt(0n);
+			expect(
+				(totalPooled * TERMINAL_RATE_PRECISION) / totalShares
+			).to.equal(terminal);
 		});
 
 		it("convertPOLToMaticX mirrors the 3-tier oracle (during recall + post-finalize)", async function () {
@@ -1220,14 +1321,19 @@ describe("MaticX sunset", function () {
 				maticX.connect(manager) as MaticX
 			).bulkUnstakeAllValidators();
 
-			// During recall — must be the inverse of preFinalizeRate.
+			// During recall — must be the inverse of preFinalizeRate. Tuple
+			// is (balanceInMaticX, totalShares, totalPooled); the implied
+			// rate (pooled * PRECISION / shares) must equal the snapshot.
 			const snap = await maticX.preFinalizeRate();
-			const [maticXOutDuringRecall, , rateDuringRecall] =
+			const [maticXOutDuringRecall, totalShares, totalPooled] =
 				await maticX.convertPOLToMaticX(TERMINAL_RATE_PRECISION);
-			expect(rateDuringRecall).to.equal(snap);
 			expect(maticXOutDuringRecall).to.equal(
 				(TERMINAL_RATE_PRECISION * TERMINAL_RATE_PRECISION) / snap
 			);
+			expect(totalShares).to.be.gt(0n);
+			expect(
+				(totalPooled * TERMINAL_RATE_PRECISION) / totalShares
+			).to.equal(snap);
 		});
 
 		it("POL donations during recall do NOT move the oracle (manipulation immunity)", async function () {
@@ -1310,11 +1416,15 @@ describe("MaticX sunset", function () {
 			await setStorageAt(maticXAddress, slot, 0n);
 			expect(await maticX.preFinalizeRate()).to.equal(0n);
 
-			const [, retPrecision, retRate] = await maticX.convertMaticXToPOL(
-				TERMINAL_RATE_PRECISION
-			);
-			expect(retPrecision).to.equal(TERMINAL_RATE_PRECISION);
-			expect(retRate).to.equal(1n);
+			// Sentinel: with rate=1, asking PRECISION shares yields 1 unit,
+			// and the implied rate (pooled * PRECISION / shares) is 1.
+			const [polFor1e18, totalShares, totalPooled] =
+				await maticX.convertMaticXToPOL(TERMINAL_RATE_PRECISION);
+			expect(polFor1e18).to.equal(1n);
+			expect(totalShares).to.be.gt(0n);
+			expect(
+				(totalPooled * TERMINAL_RATE_PRECISION) / totalShares
+			).to.equal(1n);
 		});
 
 		it("post-finalize sentinel: rate==1 when terminalRate is 0", async function () {
@@ -1335,11 +1445,13 @@ describe("MaticX sunset", function () {
 			await setStorageAt(maticXAddress, slot, 0n);
 			expect(await maticX.terminalRate()).to.equal(0n);
 
-			const [, retPrecision, retRate] = await maticX.convertMaticXToPOL(
-				TERMINAL_RATE_PRECISION
-			);
-			expect(retPrecision).to.equal(TERMINAL_RATE_PRECISION);
-			expect(retRate).to.equal(1n);
+			const [polFor1e18, totalShares, totalPooled] =
+				await maticX.convertMaticXToPOL(TERMINAL_RATE_PRECISION);
+			expect(polFor1e18).to.equal(1n);
+			expect(totalShares).to.be.gt(0n);
+			expect(
+				(totalPooled * TERMINAL_RATE_PRECISION) / totalShares
+			).to.equal(1n);
 		});
 	});
 
@@ -1350,14 +1462,16 @@ describe("MaticX sunset", function () {
 			const tx = await (
 				maticX.connect(manager) as MaticX
 			).setCustodyDelay(newDelay);
-			const block = await ethers.provider.getBlock(tx.blockNumber!);
-			const expectedTs = BigInt(block!.timestamp) + newDelay;
+			if (tx.blockNumber === null) {
+				throw new Error("setCustodyDelay tx has no blockNumber");
+			}
+			const block = await ethers.provider.getBlock(tx.blockNumber);
+			if (!block) throw new Error("block not found");
+			const expectedTs = BigInt(block.timestamp) + newDelay;
 			await expect(tx)
 				.to.emit(maticX, "SetCustodyDelay")
 				.withArgs(expectedTs);
-			expect(await maticX.sweepToCustodyTimestamp()).to.equal(
-				expectedTs
-			);
+			expect(await maticX.sweepToCustodyTimestamp()).to.equal(expectedTs);
 		});
 
 		it("reverts with ZeroCustodyDelay on zero delay", async function () {
@@ -1381,7 +1495,7 @@ describe("MaticX sunset", function () {
 			// lives at sweep time. Force sweepToCustodyTimestamp to 0 via
 			// storage so we don't have to rebuild the fixture.
 			const fx = await loadFixture(deployFixture);
-			const { maticX, manager, custody } = fx;
+			const { maticX, manager, pol, custody } = fx;
 			await pauseRecallAndFinalize(fx);
 
 			const slot = await findScalarStorageSlot(
@@ -1395,6 +1509,7 @@ describe("MaticX sunset", function () {
 
 			await expect(
 				(maticX.connect(manager) as MaticX).sweepToCustody(
+					await pol.getAddress(),
 					custody.address
 				)
 			).to.be.revertedWithCustomError(maticX, "CustodyDelayNotElapsed");
@@ -1406,7 +1521,7 @@ describe("MaticX sunset", function () {
 			// new anchor is the moment of the reconfiguration. Sweep must
 			// wait the full shortDelay from that moment.
 			const fx = await loadFixture(deployFixture);
-			const { maticX, manager, custody } = fx;
+			const { maticX, manager, pol, custody } = fx;
 			await pauseRecallAndFinalize(fx);
 
 			const shortDelay = 60n * 60n; // 1 hour
@@ -1414,10 +1529,12 @@ describe("MaticX sunset", function () {
 				shortDelay
 			);
 			const sweepTs = await maticX.sweepToCustodyTimestamp();
+			const polAddr = await pol.getAddress();
 
 			// Below the new boundary -> revert.
 			await expect(
 				(maticX.connect(manager) as MaticX).sweepToCustody(
+					polAddr,
 					custody.address
 				)
 			).to.be.revertedWithCustomError(maticX, "CustodyDelayNotElapsed");
@@ -1426,6 +1543,7 @@ describe("MaticX sunset", function () {
 			await time.increaseTo(sweepTs);
 			await expect(
 				(maticX.connect(manager) as MaticX).sweepToCustody(
+					polAddr,
 					custody.address
 				)
 			).to.emit(maticX, "SweptToCustody");
@@ -1437,11 +1555,10 @@ describe("MaticX sunset", function () {
 			// sweepToCustodyTimestamp is anchored to the reconfig moment
 			// — sweep must wait the full extendedDelay from that point.
 			const fx = await loadFixture(deployFixture);
-			const { maticX, manager, custody } = fx;
+			const { maticX, manager, pol, custody } = fx;
 			await pauseRecallAndFinalize(fx);
 
-			const originalSweepTs =
-				await maticX.sweepToCustodyTimestamp();
+			const originalSweepTs = await maticX.sweepToCustodyTimestamp();
 			// Advance past the original 3-year window so the old gate would
 			// have opened.
 			await time.increaseTo(originalSweepTs + 100n);
@@ -1454,8 +1571,10 @@ describe("MaticX sunset", function () {
 			// New anchor: now + 5y; sweep should revert until that point.
 			const newSweepTs = await maticX.sweepToCustodyTimestamp();
 			expect(newSweepTs).to.be.gt(originalSweepTs);
+			const polAddr = await pol.getAddress();
 			await expect(
 				(maticX.connect(manager) as MaticX).sweepToCustody(
+					polAddr,
 					custody.address
 				)
 			).to.be.revertedWithCustomError(maticX, "CustodyDelayNotElapsed");
@@ -1464,6 +1583,7 @@ describe("MaticX sunset", function () {
 			await time.increaseTo(newSweepTs);
 			await expect(
 				(maticX.connect(manager) as MaticX).sweepToCustody(
+					polAddr,
 					custody.address
 				)
 			).to.emit(maticX, "SweptToCustody");

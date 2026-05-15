@@ -196,31 +196,27 @@ task("sunset:verify-upgrade")
 			paused,
 			terminalRateLocked,
 			instantRedeemEnabled,
-			recalledPolBalance,
 			terminalRate,
 			sweepToCustodyTimestamp,
 			recallInitiated,
 			preFinalizeRate,
-			recallClaimsComplete,
+			recallComplete,
+			assetCustodied,
 		] = await Promise.all([
 			maticX.paused(),
 			maticX.terminalRateLocked(),
 			maticX.instantRedeemEnabled(),
-			maticX.recalledPolBalance(),
 			maticX.terminalRate(),
 			maticX.sweepToCustodyTimestamp(),
 			maticX.recallInitiated(),
 			maticX.preFinalizeRate(),
-			maticX.recallClaimsComplete(),
+			maticX.recallComplete(),
+			maticX.assetCustodied(),
 		]);
 
 		console.log("paused                    ", paused);
 		console.log("terminalRateLocked        ", terminalRateLocked);
 		console.log("instantRedeemEnabled      ", instantRedeemEnabled);
-		console.log(
-			"recalledPolBalance        ",
-			recalledPolBalance.toString()
-		);
 		console.log("terminalRate              ", terminalRate.toString());
 		console.log(
 			"sweepToCustodyTimestamp    ",
@@ -228,17 +224,18 @@ task("sunset:verify-upgrade")
 		);
 		console.log("recallInitiated           ", recallInitiated);
 		console.log("preFinalizeRate           ", preFinalizeRate.toString());
-		console.log("recallClaimsComplete      ", recallClaimsComplete);
+		console.log("recallComplete            ", recallComplete);
+		console.log("assetCustodied            ", assetCustodied);
 
 		const fresh =
 			!terminalRateLocked &&
 			!instantRedeemEnabled &&
-			recalledPolBalance === 0n &&
 			terminalRate === 0n &&
 			sweepToCustodyTimestamp === 0n &&
 			!recallInitiated &&
 			preFinalizeRate === 0n &&
-			!recallClaimsComplete;
+			!recallComplete &&
+			!assetCustodied;
 		if (!fresh) {
 			throw new Error(
 				"Post-upgrade sunset state is not fresh. Aborting."
@@ -268,12 +265,12 @@ task("sunset:status")
 			paused,
 			terminalRateLocked,
 			instantRedeemEnabled,
-			recalledPolBalance,
 			terminalRate,
 			sweepToCustodyTimestamp,
 			recallInitiated,
 			preFinalizeRate,
-			recallClaimsComplete,
+			recallComplete,
+			assetCustodied,
 			totalSupply,
 			polBalance,
 			maticBalance,
@@ -281,27 +278,21 @@ task("sunset:status")
 			maticX.paused(),
 			maticX.terminalRateLocked(),
 			maticX.instantRedeemEnabled(),
-			maticX.recalledPolBalance(),
 			maticX.terminalRate(),
 			maticX.sweepToCustodyTimestamp(),
 			maticX.recallInitiated(),
 			maticX.preFinalizeRate(),
-			maticX.recallClaimsComplete(),
+			maticX.recallComplete(),
+			maticX.assetCustodied(),
 			maticX.totalSupply(),
 			pol.balanceOf(dep.eth_maticX_proxy),
 			matic.balanceOf(dep.eth_maticX_proxy),
 		]);
 
-		const drift = polBalance - recalledPolBalance;
-
 		console.log("MaticX proxy:", dep.eth_maticX_proxy);
 		console.log("  paused                    :", paused);
 		console.log("  terminalRateLocked        :", terminalRateLocked);
 		console.log("  instantRedeemEnabled      :", instantRedeemEnabled);
-		console.log(
-			"  recalledPolBalance        :",
-			recalledPolBalance.toString()
-		);
 		console.log("  terminalRate              :", terminalRate.toString());
 		console.log(
 			"  sweepToCustodyTimestamp    :",
@@ -312,15 +303,11 @@ task("sunset:status")
 			"  preFinalizeRate           :",
 			preFinalizeRate.toString()
 		);
-		console.log("  recallClaimsComplete      :", recallClaimsComplete);
+		console.log("  recallComplete            :", recallComplete);
+		console.log("  assetCustodied            :", assetCustodied);
 		console.log("  totalSupply (MATICx)      :", totalSupply.toString());
 		console.log("  POL balance               :", polBalance.toString());
 		console.log("  MATIC balance             :", maticBalance.toString());
-		console.log(
-			"  drift (POL-recalled)      :",
-			drift.toString(),
-			drift === 0n ? "(in sync)" : "(check post-claim flows)"
-		);
 	});
 
 const STEP_ENCODERS: Record<
@@ -341,10 +328,19 @@ const STEP_ENCODERS: Record<
 	"disable-instant-redeem": async () =>
 		encodeMaticX("setInstantRedeemEnabled", [false]),
 	sweep: async (hre, _dep, arg) => {
-		if (!arg || !hre.ethers.isAddress(arg)) {
-			throw new Error("sweep step requires --arg <custodyAddress>");
+		// `--arg "<asset>,<custody>"` — comma-separated addresses since
+		// the framework only supports a single string.
+		const parts = (arg ?? "").split(",").map((p) => p.trim());
+		if (
+			parts.length !== 2 ||
+			!hre.ethers.isAddress(parts[0]) ||
+			!hre.ethers.isAddress(parts[1])
+		) {
+			throw new Error(
+				'sweep step requires --arg "<assetAddress>,<custodyAddress>"'
+			);
 		}
-		return encodeMaticX("sweepToCustody", [arg]);
+		return encodeMaticX("sweepToCustody", [parts[0], parts[1]]);
 	},
 };
 
@@ -356,7 +352,7 @@ function encodeMaticX(fn: string, args: unknown[]): string {
 		"function finalizeTerminalRate() external",
 		"function pushTerminalRateToL2() external",
 		"function setInstantRedeemEnabled(bool _enabled) external",
-		"function sweepToCustody(address _custody) external",
+		"function sweepToCustody(address _asset, address _custody) external",
 	]);
 	return iface.encodeFunctionData(fn, args);
 }
