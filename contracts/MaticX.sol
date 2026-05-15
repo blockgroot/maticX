@@ -76,6 +76,7 @@ contract MaticX is
 	error RecallAlreadyInitiated();
 	error RecallNotInitiated();
 	error RecallClaimsNotComplete();
+	error RecallAlreadyComplete();
 	error ZeroCustodyDelay();
 
 	/// ---------------------- Sunset events -----------------------------------
@@ -610,6 +611,7 @@ contract MaticX is
 	function claimAssetRecallNonces() external onlyRole(DEFAULT_ADMIN_ROLE) {
 		require(paused(), "Pause first");
 		if (!recallInitiated) revert RecallNotInitiated();
+		if (recallComplete) revert RecallAlreadyComplete();
 		if (terminalRateLocked) revert TerminalRateAlreadyLocked();
 
 		uint256[] memory validatorIds = validatorRegistry.getValidators();
