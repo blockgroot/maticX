@@ -51,7 +51,6 @@ contract MaticX is
 	/// ---------------------- Sunset storage (v3) -----------------------------
 	bool public terminalRateLocked;
 	bool public instantRedeemEnabled;
-	uint256 public recalledPolBalance;
 	uint256 public terminalRate;
 	/// @dev Absolute timestamp at which `sweepToCustody` becomes callable.
 	/// The admin sets the precomputed `now + delay` directly; the setter
@@ -92,7 +91,7 @@ contract MaticX is
 	);
 	event TerminalRatePushedToL2(
 		uint256 supplyAtPush,
-		uint256 recalledPolBalance
+		uint256 polBalanceAtPush
 	);
 	event InstantRedeemToggled(address indexed by, bool enabled);
 	event InstantClaimed(
@@ -653,22 +652,21 @@ contract MaticX is
 		if (polBalance == 0 || supply == 0) revert EmptyContract();
 
 		terminalRate = (polBalance * TERMINAL_RATE_PRECISION) / supply;
-		recalledPolBalance = polBalance;
 		terminalRateLocked = true;
 
 		emit AssetRecallCompleted(polBalance, supply, terminalRate);
 	}
 
-	/// @notice Pushes the post-freeze (totalSupply, recalledPolBalance) pair to
-	/// the L2 ChildPool. Idempotent: ratio stays correct across L1 burns, so
-	/// a single push after freeze is sufficient.
+	/// @notice Pushes the post-freeze (totalSupply, polBalance) pair to the
+	/// L2 ChildPool. Idempotent: supply and balance decrement proportionally
+	/// on each instantClaim, so the implied rate is invariant — a single
+	/// push after freeze is sufficient, retries are safe.
 	function pushTerminalRateToL2() external onlyRole(DEFAULT_ADMIN_ROLE) {
 		if (!terminalRateLocked) revert TerminalRateNotLocked();
 		uint256 supply = totalSupply();
-		fxStateRootTunnel.sendMessageToChild(
-			abi.encode(supply, recalledPolBalance)
-		);
-		emit TerminalRatePushedToL2(supply, recalledPolBalance);
+		uint256 polBalance = polToken.balanceOf(address(this));
+		fxStateRootTunnel.sendMessageToChild(abi.encode(supply, polBalance));
+		emit TerminalRatePushedToL2(supply, polBalance);
 	}
 
 	/// @notice Enables or disables user-facing instant redemption. Requires
@@ -695,12 +693,11 @@ contract MaticX is
 
 		(uint256 amountInPol, , ) = _convertMaticXToPOL(amountInMaticX);
 		if (amountInPol == 0) revert AmountInPolZero();
-		if (recalledPolBalance < amountInPol) {
+		if (polToken.balanceOf(address(this)) < amountInPol) {
 			revert InsufficientRecalledBalance();
 		}
 
 		_burn(msg.sender, amountInMaticX);
-		recalledPolBalance -= amountInPol;
 		polToken.safeTransfer(msg.sender, amountInPol);
 
 		emit InstantClaimed(msg.sender, amountInMaticX, amountInPol);
@@ -724,7 +721,6 @@ contract MaticX is
 
 		uint256 polBal = polToken.balanceOf(address(this));
 		uint256 maticBal = maticToken.balanceOf(address(this));
-		recalledPolBalance = 0;
 
 		if (polBal > 0) polToken.safeTransfer(_custody, polBal);
 		if (maticBal > 0) maticToken.safeTransfer(_custody, maticBal);
