@@ -873,10 +873,15 @@ contract MaticX is
 	) private view returns (uint256, uint256, uint256) {
 		// Post-finalize: serve the locked terminal rate so lending-market
 		// oracles cannot be moved by donations or recalled-balance burns.
+		// Return derived (shares, pooled) so totalPooled/totalShares ratio
+		// equals the locked rate exactly — donation-immune.
 		if (terminalRateLocked) {
 			uint256 rate = terminalRate == 0 ? 1 : terminalRate;
 			uint256 balanceInPOL = (_balance * rate) / TERMINAL_RATE_PRECISION;
-			return (balanceInPOL, TERMINAL_RATE_PRECISION, rate);
+			uint256 totalShares = totalSupply() == 0 ? 1 : totalSupply();
+			uint256 totalPooled = (totalShares * rate) /
+				TERMINAL_RATE_PRECISION;
+			return (balanceInPOL, totalShares, totalPooled);
 		}
 
 		// During recall (post-bulkUnstake, pre-finalize): serve the
@@ -885,7 +890,10 @@ contract MaticX is
 		if (recallInitiated) {
 			uint256 rate = preFinalizeRate == 0 ? 1 : preFinalizeRate;
 			uint256 balanceInPOL = (_balance * rate) / TERMINAL_RATE_PRECISION;
-			return (balanceInPOL, TERMINAL_RATE_PRECISION, rate);
+			uint256 totalShares = totalSupply() == 0 ? 1 : totalSupply();
+			uint256 totalPooled = (totalShares * rate) /
+				TERMINAL_RATE_PRECISION;
+			return (balanceInPOL, totalShares, totalPooled);
 		}
 
 		uint256 totalShares = totalSupply();
@@ -934,11 +942,16 @@ contract MaticX is
 	) private view returns (uint256, uint256, uint256) {
 		// Post-finalize: serve the locked terminal rate. Inverse of
 		// `_convertMaticXToPOL`. Same donation/burn-drift protection.
+		// Return derived (shares, pooled) so totalPooled/totalShares ratio
+		// equals the locked rate exactly — donation-immune.
 		if (terminalRateLocked) {
 			uint256 rate = terminalRate == 0 ? 1 : terminalRate;
 			uint256 balanceInMaticX = (_balance * TERMINAL_RATE_PRECISION) /
 				rate;
-			return (balanceInMaticX, TERMINAL_RATE_PRECISION, rate);
+			uint256 totalShares = totalSupply() == 0 ? 1 : totalSupply();
+			uint256 totalPooled = (totalShares * rate) /
+				TERMINAL_RATE_PRECISION;
+			return (balanceInMaticX, totalShares, totalPooled);
 		}
 
 		// During recall: serve the pre-recall snapshot.
@@ -946,7 +959,10 @@ contract MaticX is
 			uint256 rate = preFinalizeRate == 0 ? 1 : preFinalizeRate;
 			uint256 balanceInMaticX = (_balance * TERMINAL_RATE_PRECISION) /
 				rate;
-			return (balanceInMaticX, TERMINAL_RATE_PRECISION, rate);
+			uint256 totalShares = totalSupply() == 0 ? 1 : totalSupply();
+			uint256 totalPooled = (totalShares * rate) /
+				TERMINAL_RATE_PRECISION;
+			return (balanceInMaticX, totalShares, totalPooled);
 		}
 
 		uint256 totalShares = totalSupply();
