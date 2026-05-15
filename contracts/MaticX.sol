@@ -584,12 +584,12 @@ contract MaticX is
 			);
 
 			if (stake > 0) {
-				uint256 nonce = IValidatorShare(vs).unbondNonces(
-					address(this)
-				) + 1;
 				IValidatorShare(vs).sellVoucher_newPOL(
 					stake,
 					type(uint256).max
+				);
+				uint256 nonce = IValidatorShare(vs).unbondNonces(
+					address(this)
 				);
 				assetRecallNonces[vs] = nonce;
 				emit AssetRecallInitiated(vs, nonce, stake);
