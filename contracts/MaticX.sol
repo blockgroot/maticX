@@ -49,22 +49,17 @@ contract MaticX is
 	uint256 private reentrancyGuardStatus;
 
 	/// ---------------------- Sunset storage (v3) -----------------------------
+	bool public recallInitiated;
+	bool public recallComplete;
 	bool public terminalRateLocked;
 	bool public instantRedeemEnabled;
-	uint256 public terminalRate;
-	/// @dev Absolute timestamp at which `sweepToCustody` becomes callable.
-	/// The admin sets the precomputed `now + delay` directly; the setter
-	/// requires the value to be strictly in the future, so admin cannot
-	/// short-circuit an existing window.
-	uint256 public sweepToCustodyTimestamp;
-	mapping(address => uint256) public assetRecallNonces;
-	bool public recallInitiated;
-	uint256 public preFinalizeRate;
-	bool public recallComplete;
-	/// @dev Flips true on the first sweepToCustody call (any asset).
-	/// One-way: once an asset has been moved to custody, instantClaim is
-	/// permanently disabled.
 	bool public assetCustodied;
+
+	uint256 public preFinalizeRate;
+	uint256 public terminalRate;
+	uint256 public sweepToCustodyTimestamp;
+
+	mapping(address => uint256) public assetRecallNonces;
 
 	/// ---------------------- Sunset errors -----------------------------------
 	error TerminalRateAlreadyLocked();
@@ -372,8 +367,7 @@ contract MaticX is
 	}
 
 	/// @notice Claims POL tokens from a validator share and sends them to the
-	/// user. Intentionally not gated by `whenNotPaused` so that users can
-	/// always claim previously-initiated withdrawals during sunset.
+	/// user.
 	/// @param _idx - Array index of the user's withdrawal request
 	function claimWithdrawal(uint256 _idx) external override nonReentrant {
 		WithdrawalRequest[] storage userRequests = userWithdrawalRequests[
@@ -559,20 +553,13 @@ contract MaticX is
 
 	/// ------------------------------ Sunset ----------------------------------
 
-	/// @notice Unstakes the contract's full stake from every registered
-	/// validator. Once-only: subsequent calls revert via `recallInitiated`.
-	/// Per-validator auto-claim rewards land in this contract and are
-	/// captured later by `finalizeTerminalRate`.
+	/// @notice Unstakes the full stake from every registered validator.
 	function bulkUnstakeAllValidators() external onlyRole(DEFAULT_ADMIN_ROLE) {
 		require(paused(), "Pause first");
 		if (recallInitiated) revert RecallAlreadyInitiated();
 
-		// Freeze oracle the moment recall begins. Live legacy path would
-		// drift toward 0 as `sellVoucher_newPOL` moves stake into the
-		// withdraw pool; lending markets reading the rate would see a
-		// crash and could mass-liquidate users before instant redeem
-		// even goes live. Snapshot once, oracle reads it until finalize
-		// replaces with the actual `terminalRate`.
+		// Snapshot pre-recall rate so oracle does not drift toward zero
+		// as vouchers move into the withdraw pool.
 		recallInitiated = true;
 		uint256 supplySnap = totalSupply();
 		preFinalizeRate = supplySnap == 0
@@ -605,12 +592,8 @@ contract MaticX is
 		}
 	}
 
-	/// @notice Claims all pending unbond nonces accumulated during
-	/// `bulkUnstakeAllValidators`. Idempotent: pops nonces only on successful
-	/// claim so the txn can be retried if some unbonds are not yet matured.
-	/// Precondition: admin waited full unbond period after
-	/// `bulkUnstakeAllValidators`. Any residual non-POL token (e.g. legacy
-	/// MATIC dust) is swept raw via `sweepToCustody` after `sweepToCustodyTimestamp`.
+	/// @notice Claims all pending unbond nonces from `bulkUnstakeAllValidators`.
+	/// Retryable: nonces clear only on successful claim.
 	function claimAssetRecallNonces() external onlyRole(DEFAULT_ADMIN_ROLE) {
 		require(paused(), "Pause first");
 		if (!recallInitiated) revert RecallNotInitiated();
@@ -624,9 +607,6 @@ contract MaticX is
 			address vs = stakeManager.getValidatorContract(validatorIds[i]);
 			uint256 nonce = assetRecallNonces[vs];
 			if (nonce != 0) {
-				// Claim first, then clear: if the validator reverts (e.g.
-				// unmatured unbond), the whole tx rolls back including
-				// the mapping delete, so the nonce remains for retry.
 				IValidatorShare(vs).unstakeClaimTokens_newPOL(nonce);
 				delete assetRecallNonces[vs];
 			}
@@ -636,17 +616,10 @@ contract MaticX is
 			}
 		}
 
-		// Set only after the whole loop completes: if any per-validator
-		// claim reverts (unbond not yet matured), the entire tx reverts
-		// and this flag stays false so the txn can be retried.
 		recallComplete = true;
 	}
 
-	/// @notice Freezes the MATICx -> POL exchange rate using current POL
-	/// balance. Single shot — irreversible. Precondition: admin ran
-	/// `claimAssetRecallNonces` and verified all asset-recall unbonds claimed off-chain.
-	/// Dust remaining in validators is forfeit (not user funds — terminal rate
-	/// is computed from POL balance only).
+	/// @notice Freezes the MATICx -> POL exchange rate. One-shot.
 	function finalizeTerminalRate() external onlyRole(DEFAULT_ADMIN_ROLE) {
 		require(paused(), "Pause first");
 		if (terminalRateLocked) revert TerminalRateAlreadyLocked();
@@ -662,10 +635,7 @@ contract MaticX is
 		emit AssetRecallCompleted(polBalance, supply, terminalRate);
 	}
 
-	/// @notice Pushes the post-freeze (totalSupply, polBalance) pair to the
-	/// L2 ChildPool. Idempotent: supply and balance decrement proportionally
-	/// on each instantClaim, so the implied rate is invariant — a single
-	/// push after freeze is sufficient, retries are safe.
+	/// @notice Pushes (totalSupply, polBalance) to the L2 ChildPool.
 	function pushTerminalRateToL2() external onlyRole(DEFAULT_ADMIN_ROLE) {
 		if (!terminalRateLocked) revert TerminalRateNotLocked();
 		uint256 supply = totalSupply();
@@ -674,8 +644,7 @@ contract MaticX is
 		emit TerminalRatePushedToL2(supply, polBalance);
 	}
 
-	/// @notice Enables or disables user-facing instant redemption. Requires
-	/// `terminalRateLocked` before enabling. Also acts as an emergency kill-switch.
+	/// @notice Enables or disables instant redemption.
 	/// @param _enabled - Whether instant redemption is enabled
 	function setInstantRedeemEnabled(
 		bool _enabled
@@ -685,11 +654,8 @@ contract MaticX is
 		emit InstantRedeemToggled(msg.sender, _enabled);
 	}
 
-	/// @notice Burns the caller's entire MATICx balance and sends them POL at
-	/// the terminal rate. No amount argument — there is exactly one redemption
-	/// path post-sunset and it always exits the caller in full. Reverts with
-	/// `ZeroAmount` if the caller holds no MATICx.
-	/// Intentionally not gated by `whenNotPaused`.
+	/// @notice Burns the caller's full MATICx balance and sends them POL at
+	/// the terminal rate.
 	function instantClaim() external nonReentrant {
 		if (!instantRedeemEnabled) revert InstantRedeemNotEnabled();
 		if (assetCustodied) revert AssetCustodied();
@@ -709,10 +675,8 @@ contract MaticX is
 		emit InstantClaimed(msg.sender, amountInMaticX, amountInPol);
 	}
 
-	/// @notice After `sweepToCustodyTimestamp` is reached, sweeps the full
-	/// balance of `_asset` to the given custody address. Intended for
-	/// long-tail residue handover. One-way: the first call (any asset)
-	/// permanently disables instantClaim via `assetCustodied`.
+	/// @notice Sweeps the full balance of `_asset` to `_custody`. Callable
+	/// only after `sweepToCustodyTimestamp`. Disables instantClaim.
 	/// @param _asset - Token to sweep
 	/// @param _custody - Address to receive the swept tokens
 	function sweepToCustody(
@@ -781,10 +745,7 @@ contract MaticX is
 		emit SetTreasury(_treasury);
 	}
 
-	/// @notice Sets the sweep window by recomputing `sweepToCustodyTimestamp
-	/// = block.timestamp + _custodyDelay`. Reverts on zero delay. Each
-	/// call overwrites the prior value, so any reconfiguration restarts
-	/// the clock from now
+	/// @notice Sets the sweep window.
 	/// @param _custodyDelay - Seconds from now until sweep becomes callable
 	function setCustodyDelay(
 		uint256 _custodyDelay
@@ -835,13 +796,8 @@ contract MaticX is
 		emit SetVersion(_version);
 	}
 
-	/// @notice Toggles the paused status of this contract. Once
-	/// `bulkUnstakeAllValidators` has run (i.e. `recallInitiated == true`),
-	/// the contract cannot be unpaused: the sunset has crossed the point
-	/// of no return at the Polygon protocol level (sold vouchers cannot be
-	/// un-sold), so all `whenNotPaused` user paths (submit / requestWithdraw
-	/// / claimWithdrawal / withdrawRewards / stakeRewards) stay bricked
-	/// for the rest of the contract's life.
+	/// @notice Toggles the paused status of this contract. Cannot unpause
+	/// once `recallInitiated` is true.
 	function togglePause() external override onlyRole(DEFAULT_ADMIN_ROLE) {
 		if (recallInitiated && paused()) {
 			revert UnpauseLockedAfterRecall();
@@ -882,10 +838,6 @@ contract MaticX is
 	function _convertMaticXToPOL(
 		uint256 _balance
 	) private view returns (uint256, uint256, uint256) {
-		// Post-finalize: serve the locked terminal rate so lending-market
-		// oracles cannot be moved by donations or recalled-balance burns.
-		// Return derived (shares, pooled) so totalPooled/totalShares ratio
-		// equals the locked rate exactly — donation-immune.
 		if (terminalRateLocked) {
 			uint256 rate = terminalRate == 0 ? 1 : terminalRate;
 			uint256 balanceInPOL = (_balance * rate) / TERMINAL_RATE_PRECISION;
@@ -895,9 +847,6 @@ contract MaticX is
 			return (balanceInPOL, totalShares, totalPooled);
 		}
 
-		// During recall (post-bulkUnstake, pre-finalize): serve the
-		// pre-recall snapshot so oracle does not drift toward zero as
-		// validators unbond.
 		if (recallInitiated) {
 			uint256 rate = preFinalizeRate == 0 ? 1 : preFinalizeRate;
 			uint256 balanceInPOL = (_balance * rate) / TERMINAL_RATE_PRECISION;
@@ -951,10 +900,6 @@ contract MaticX is
 	function _convertPOLToMaticX(
 		uint256 _balance
 	) private view returns (uint256, uint256, uint256) {
-		// Post-finalize: serve the locked terminal rate. Inverse of
-		// `_convertMaticXToPOL`. Same donation/burn-drift protection.
-		// Return derived (shares, pooled) so totalPooled/totalShares ratio
-		// equals the locked rate exactly — donation-immune.
 		if (terminalRateLocked) {
 			uint256 rate = terminalRate == 0 ? 1 : terminalRate;
 			uint256 balanceInMaticX = (_balance * TERMINAL_RATE_PRECISION) /
@@ -965,7 +910,6 @@ contract MaticX is
 			return (balanceInMaticX, totalShares, totalPooled);
 		}
 
-		// During recall: serve the pre-recall snapshot.
 		if (recallInitiated) {
 			uint256 rate = preFinalizeRate == 0 ? 1 : preFinalizeRate;
 			uint256 balanceInMaticX = (_balance * TERMINAL_RATE_PRECISION) /
