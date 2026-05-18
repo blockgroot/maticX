@@ -598,7 +598,7 @@ contract MaticX is
 		require(paused(), "Pause first");
 		if (!recallInitiated) revert RecallNotInitiated();
 		if (recallComplete) revert RecallAlreadyComplete();
-		if (terminalRateLocked) revert TerminalRateAlreadyLocked();
+		recallComplete = true;
 
 		uint256[] memory validatorIds = validatorRegistry.getValidators();
 		uint256 validatorCount = validatorIds.length;
@@ -615,22 +615,20 @@ contract MaticX is
 				++i;
 			}
 		}
-
-		recallComplete = true;
 	}
 
 	/// @notice Freezes the MATICx -> POL exchange rate. One-shot.
 	function finalizeTerminalRate() external onlyRole(DEFAULT_ADMIN_ROLE) {
 		require(paused(), "Pause first");
-		if (terminalRateLocked) revert TerminalRateAlreadyLocked();
 		if (!recallComplete) revert RecallClaimsNotComplete();
+		if (terminalRateLocked) revert TerminalRateAlreadyLocked();
+		terminalRateLocked = true;
 
 		uint256 polBalance = polToken.balanceOf(address(this));
 		uint256 supply = totalSupply();
 		if (polBalance == 0 || supply == 0) revert EmptyContract();
 
 		terminalRate = (polBalance * TERMINAL_RATE_PRECISION) / supply;
-		terminalRateLocked = true;
 
 		emit AssetRecallCompleted(polBalance, supply, terminalRate);
 	}
@@ -649,7 +647,7 @@ contract MaticX is
 	function setInstantRedeemEnabled(
 		bool _enabled
 	) external onlyRole(DEFAULT_ADMIN_ROLE) {
-		if (_enabled && !terminalRateLocked) revert TerminalRateNotLocked();
+		if (!terminalRateLocked) revert TerminalRateNotLocked();
 		instantRedeemEnabled = _enabled;
 		emit InstantRedeemToggled(msg.sender, _enabled);
 	}
@@ -684,6 +682,7 @@ contract MaticX is
 		address _custody
 	) external nonReentrant onlyRole(DEFAULT_ADMIN_ROLE) {
 		if (!terminalRateLocked) revert TerminalRateNotLocked();
+		assetCustodied = true;
 		if (
 			sweepToCustodyTimestamp == 0 ||
 			block.timestamp < sweepToCustodyTimestamp
@@ -697,7 +696,6 @@ contract MaticX is
 		uint256 bal = IERC20Upgradeable(_asset).balanceOf(address(this));
 		if (bal == 0) revert ZeroAmount();
 
-		assetCustodied = true;
 		IERC20Upgradeable(_asset).safeTransfer(_custody, bal);
 
 		emit SweptToCustody(_asset, _custody, bal);
