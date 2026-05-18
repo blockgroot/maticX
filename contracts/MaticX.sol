@@ -836,26 +836,20 @@ contract MaticX is
 	function _convertMaticXToPOL(
 		uint256 _balance
 	) private view returns (uint256, uint256, uint256) {
-		if (terminalRateLocked) {
-			uint256 rate = terminalRate == 0 ? 1 : terminalRate;
-			uint256 balanceInPOL = (_balance * rate) / TERMINAL_RATE_PRECISION;
-			uint256 totalShares = totalSupply() == 0 ? 1 : totalSupply();
-			uint256 totalPooled = (totalShares * rate) /
-				TERMINAL_RATE_PRECISION;
-			return (balanceInPOL, totalShares, totalPooled);
-		}
-
-		if (recallInitiated) {
-			uint256 rate = preFinalizeRate == 0 ? 1 : preFinalizeRate;
-			uint256 balanceInPOL = (_balance * rate) / TERMINAL_RATE_PRECISION;
-			uint256 totalShares = totalSupply() == 0 ? 1 : totalSupply();
-			uint256 totalPooled = (totalShares * rate) /
-				TERMINAL_RATE_PRECISION;
-			return (balanceInPOL, totalShares, totalPooled);
-		}
-
 		uint256 totalShares = totalSupply();
-		totalShares = totalShares == 0 ? 1 : totalShares;
+		if (totalShares == 0) totalShares = 1;
+
+		if (terminalRateLocked || recallInitiated) {
+			uint256 rate = terminalRateLocked ? terminalRate : preFinalizeRate;
+			if (rate == 0) rate = 1;
+			uint256 totalPooled = (totalShares * rate) /
+				TERMINAL_RATE_PRECISION;
+			return (
+				(_balance * rate) / TERMINAL_RATE_PRECISION,
+				totalShares,
+				totalPooled
+			);
+		}
 
 		uint256 totalPooledAmount = getTotalStakeAcrossAllValidators();
 		if (totalPooledAmount == 0) {
@@ -898,28 +892,20 @@ contract MaticX is
 	function _convertPOLToMaticX(
 		uint256 _balance
 	) private view returns (uint256, uint256, uint256) {
-		if (terminalRateLocked) {
-			uint256 rate = terminalRate == 0 ? 1 : terminalRate;
-			uint256 balanceInMaticX = (_balance * TERMINAL_RATE_PRECISION) /
-				rate;
-			uint256 totalShares = totalSupply() == 0 ? 1 : totalSupply();
-			uint256 totalPooled = (totalShares * rate) /
-				TERMINAL_RATE_PRECISION;
-			return (balanceInMaticX, totalShares, totalPooled);
-		}
-
-		if (recallInitiated) {
-			uint256 rate = preFinalizeRate == 0 ? 1 : preFinalizeRate;
-			uint256 balanceInMaticX = (_balance * TERMINAL_RATE_PRECISION) /
-				rate;
-			uint256 totalShares = totalSupply() == 0 ? 1 : totalSupply();
-			uint256 totalPooled = (totalShares * rate) /
-				TERMINAL_RATE_PRECISION;
-			return (balanceInMaticX, totalShares, totalPooled);
-		}
-
 		uint256 totalShares = totalSupply();
-		totalShares = totalShares == 0 ? 1 : totalShares;
+		if (totalShares == 0) totalShares = 1;
+
+		if (terminalRateLocked || recallInitiated) {
+			uint256 rate = terminalRateLocked ? terminalRate : preFinalizeRate;
+			if (rate == 0) rate = 1;
+			uint256 totalPooled = (totalShares * rate) /
+				TERMINAL_RATE_PRECISION;
+			return (
+				(_balance * TERMINAL_RATE_PRECISION) / rate,
+				totalShares,
+				totalPooled
+			);
+		}
 
 		uint256 totalPooledAmount = getTotalStakeAcrossAllValidators();
 		if (totalPooledAmount == 0) {
