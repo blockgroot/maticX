@@ -70,7 +70,6 @@ contract MaticX is
 	error CustodyDelayNotElapsed();
 	error ZeroAddress();
 	error ZeroAmount();
-	error InstantRedeemNotEnabled();
 	error UnpauseLockedAfterRecall();
 	error RecallAlreadyInitiated();
 	error RecallNotInitiated();
@@ -269,8 +268,15 @@ contract MaticX is
 	// slither-disable-next-line reentrancy-no-eth
 	function requestWithdraw(
 		uint256 _amount
-	) external override nonReentrant whenNotPaused {
+	) external override nonReentrant {
 		require(_amount > 0, "Invalid amount");
+
+		if (instantRedeemEnabled) {
+			_instantClaim(_amount);
+			return;
+		}
+
+		require(!paused(), "Pausable: paused");
 
 		(
 			uint256 amountToWithdraw,
@@ -652,29 +658,26 @@ contract MaticX is
 		emit InstantRedeemToggled(msg.sender, _enabled);
 	}
 
-	/// @notice Burns the caller's full MATICx balance and sends them POL at
-	/// the terminal rate.
-	function instantClaim() external nonReentrant {
-		if (!instantRedeemEnabled) revert InstantRedeemNotEnabled();
+	/// @dev Burns `_amount` MATICx from caller and sends POL at the terminal
+	/// rate from recalled balance. Routed via requestWithdraw once
+	/// instantRedeemEnabled is set.
+	function _instantClaim(uint256 _amount) private {
 		if (assetCustodied) revert AssetCustodied();
 
-		uint256 amountInMaticX = balanceOf(msg.sender);
-		if (amountInMaticX == 0) revert ZeroAmount();
-
-		(uint256 amountInPol, , ) = _convertMaticXToPOL(amountInMaticX);
+		(uint256 amountInPol, , ) = _convertMaticXToPOL(_amount);
 		if (amountInPol == 0) revert AmountInPolZero();
 		if (polToken.balanceOf(address(this)) < amountInPol) {
 			revert InsufficientRecalledBalance();
 		}
 
-		_burn(msg.sender, amountInMaticX);
+		_burn(msg.sender, _amount);
 		polToken.safeTransfer(msg.sender, amountInPol);
 
-		emit InstantClaimed(msg.sender, amountInMaticX, amountInPol);
+		emit InstantClaimed(msg.sender, _amount, amountInPol);
 	}
 
 	/// @notice Sweeps the full balance of `_asset` to `_custody`. Callable
-	/// only after `sweepToCustodyTimestamp`. Disables instantClaim.
+	/// only after `sweepToCustodyTimestamp`. Disables sunset claims.
 	/// @param _asset - Token to sweep
 	/// @param _custody - Address to receive the swept tokens
 	function sweepToCustody(
