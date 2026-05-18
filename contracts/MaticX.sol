@@ -601,7 +601,6 @@ contract MaticX is
 	/// @notice Claims all pending unbond nonces from `bulkUnstakeAllValidators`.
 	/// Retryable: nonces clear only on successful claim.
 	function claimAssetRecallNonces() external onlyRole(DEFAULT_ADMIN_ROLE) {
-		require(paused(), "Pause first");
 		if (!recallInitiated) revert RecallNotInitiated();
 		if (recallComplete) revert RecallAlreadyComplete();
 		recallComplete = true;
@@ -625,7 +624,6 @@ contract MaticX is
 
 	/// @notice Freezes the MATICx -> POL exchange rate. One-shot.
 	function finalizeTerminalRate() external onlyRole(DEFAULT_ADMIN_ROLE) {
-		require(paused(), "Pause first");
 		if (!recallComplete) revert RecallClaimsNotComplete();
 		if (terminalRateLocked) revert TerminalRateAlreadyLocked();
 		terminalRateLocked = true;
