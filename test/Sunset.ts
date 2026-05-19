@@ -21,9 +21,7 @@ import { extractEnvironmentVariables } from "../utils/environment";
 import { getProviderUrl, Network } from "../utils/network";
 
 const envVars = extractEnvironmentVariables();
-// Allow MAINNET_RPC_URL to override the constructed provider URL so the
-// suite can run against a private node or a free public endpoint without
-// rewiring utils/network.ts.
+
 const providerUrl =
 	process.env.MAINNET_RPC_URL ||
 	getProviderUrl(
@@ -43,9 +41,7 @@ describe("MaticX sunset", function () {
 	}
 
 	async function deployFixture() {
-		// When using a public RPC (no archival), pin to latest so historical
-		// state queries don't fail. Archival nodes (paid Alchemy/Infura) can
-		// honor the env's FORKING_BLOCK_NUMBER.
+
 		const forkBlock = process.env.MAINNET_RPC_URL
 			? undefined
 			: envVars.FORKING_BLOCK_NUMBER;
@@ -118,8 +114,7 @@ describe("MaticX sunset", function () {
 		await (maticX.connect(manager) as MaticX).initializeV2(
 			await pol.getAddress()
 		);
-		// Fixture pre-configures the sweep window: setCustodyDelay stores
-		// `block.timestamp + CUSTODY_DELAY` as sweepToCustodyTimestamp.
+
 		await (maticX.connect(manager) as MaticX).setCustodyDelay(
 			CUSTODY_DELAY
 		);
@@ -206,9 +201,6 @@ describe("MaticX sunset", function () {
 		);
 	}
 
-	// Probe to find the slot index of a mapping(address => uint256) so we can
-	// write to mapping[key] via setStorageAt. Returns the *mapping slot index*
-	// (S) — actual storage at `keccak256(abi.encode(key, S))`.
 	async function findMappingSlot(
 		contractAddress: string,
 		key: string,
@@ -232,7 +224,6 @@ describe("MaticX sunset", function () {
 		);
 	}
 
-	// Write a uint256 directly into mapping[key] at the discovered slot index.
 	async function writeMappingValue(
 		contractAddress: string,
 		mappingSlot: number,
@@ -261,13 +252,9 @@ describe("MaticX sunset", function () {
 				stakeManagerGovernance,
 			} = fx;
 
-			// 1. Pause
 			await (maticX.connect(manager) as MaticX).togglePause();
 			expect(await maticX.paused()).to.equal(true);
 
-			// 2. Bulk unstake — assert AssetRecallInitiated event args on the
-			// preferred deposit validator (the only one with stake in this
-			// fresh-proxy fixture).
 			const [preferredId] = await fx.validatorRegistry.getValidators();
 			const preferredShare =
 				await stakeManager.getValidatorContract(preferredId);
@@ -291,16 +278,13 @@ describe("MaticX sunset", function () {
 				.to.emit(maticX, "AssetRecallInitiated")
 				.withArgs(preferredShare, nonceBefore + 1n, stakeBefore);
 
-			// 3. Advance epoch past unbond
 			await advanceUnbond(stakeManager, stakeManagerGovernance);
 
-			// 4. Claim asset-recall nonces — must net positive POL to the contract
 			const polBalBefore = await pol.balanceOf(maticXAddress);
 			await (maticX.connect(manager) as MaticX).claimAssetRecallNonces();
 			const polBalAfter = await pol.balanceOf(maticXAddress);
 			expect(polBalAfter).to.be.gt(polBalBefore);
 
-			// 5. Freeze
 			const supply = await maticX.totalSupply();
 			const expectedRate =
 				(polBalAfter * TERMINAL_RATE_PRECISION) / supply;
@@ -314,14 +298,12 @@ describe("MaticX sunset", function () {
 			expect(await maticX.terminalRate()).to.equal(expectedRate);
 			expect(await pol.balanceOf(maticXAddress)).to.equal(polBalAfter);
 
-			// 6. Push to L2
 			await expect(
 				(maticX.connect(manager) as MaticX).pushTerminalRateToL2()
 			)
 				.to.emit(maticX, "TerminalRatePushedToL2")
 				.withArgs(supply, polBalAfter);
 
-			// 7. Enable instant redeem
 			await expect(
 				(maticX.connect(manager) as MaticX).setInstantRedeemEnabled(
 					true
@@ -330,7 +312,6 @@ describe("MaticX sunset", function () {
 				.to.emit(maticX, "InstantRedeemToggled")
 				.withArgs(manager.address, true);
 
-			// 8. Staker A instant-claims their full position
 			const stakerAShares = await maticX.balanceOf(stakerA.address);
 			const expectedPol =
 				(stakerAShares * expectedRate) / TERMINAL_RATE_PRECISION;
@@ -350,7 +331,6 @@ describe("MaticX sunset", function () {
 			);
 			expect(await pol.balanceOf(stakerA.address)).to.be.gte(expectedPol);
 
-			// 9. Sweep — must wait the full custody delay
 			const polAddr = await pol.getAddress();
 			const maticAddr = await fx.matic.getAddress();
 			await expect(
@@ -390,7 +370,6 @@ describe("MaticX sunset", function () {
 			);
 			expect(await maticX.assetCustodied()).to.equal(true);
 
-			// Staker B still holds their MATICx but no POL left to redeem
 			void stakerB;
 		});
 	});
@@ -405,7 +384,6 @@ describe("MaticX sunset", function () {
 				true
 			);
 
-			// Must revert with Pausable:paused
 			await expect(
 				(maticX.connect(stakerA) as MaticX).submit(stakeAmount)
 			).to.be.revertedWith("Pausable: paused");
@@ -424,8 +402,6 @@ describe("MaticX sunset", function () {
 				(maticX.connect(manager) as MaticX).setFeePercent(100)
 			).to.be.revertedWith("Pausable: paused");
 
-			// requestWithdraw routes to _instantClaim once instantRedeemEnabled
-			// is true, bypassing the pause guard intentionally.
 			const shares = await maticX.balanceOf(stakerA.address);
 			await expect(
 				(maticX.connect(stakerA) as MaticX).requestWithdraw(shares)
@@ -473,10 +449,7 @@ describe("MaticX sunset", function () {
 		});
 
 		it("skips validators with zero stake (no nonce, no event)", async function () {
-			// In the fresh-proxy fixture, only the preferred deposit validator
-			// has stake from the test stakers' submitPOL. The other 4 registered
-			// validators have stake == 0 for THIS proxy. The `if (stake > 0)`
-			// branch must skip them — no nonce, no event.
+
 			const fx = await loadFixture(deployFixture);
 			const { maticX, manager, stakeManager, validatorRegistry } = fx;
 			await (maticX.connect(manager) as MaticX).togglePause();
@@ -521,11 +494,7 @@ describe("MaticX sunset", function () {
 		});
 
 		it("captured nonce equals validator unbondNonces post-sell (regression: not +1)", async function () {
-			// Regression guard for the nonce-read ordering fix: read nonce
-			// AFTER `sellVoucher_newPOL`, no `+1`. If the function reverts to
-			// the pre-fix ordering, `assetRecallNonces[vs]` would be off-by-one
-			// from `unbondNonces(maticX)` and `claimAssetRecallNonces` would
-			// either claim the wrong nonce or fail.
+
 			const fx = await loadFixture(deployFixture);
 			const { maticX, maticXAddress, manager, stakeManager, validatorRegistry } = fx;
 			await (maticX.connect(manager) as MaticX).togglePause();
@@ -551,9 +520,6 @@ describe("MaticX sunset", function () {
 
 	describe("claimAssetRecallNonces", function () {
 		it("reverts after recallComplete", async function () {
-			// pauseRecallAndFinalize sets recallComplete = true, and the
-			// `recallComplete` check fires before `terminalRateLocked` in the
-			// function body — so this is the revert we observe.
 			const fx = await loadFixture(deployFixture);
 			const { maticX, manager } = fx;
 			await pauseRecallAndFinalize(fx);
@@ -578,8 +544,6 @@ describe("MaticX sunset", function () {
 				maticX.connect(manager) as MaticX
 			).bulkUnstakeAllValidators();
 
-			// Capture per-validator nonces before the failed retry so we
-			// can confirm the tx-level revert rolls them back intact.
 			const validatorIds = await fx.validatorRegistry.getValidators();
 			const shareAddrs = await Promise.all(
 				validatorIds.map((id) => stakeManager.getValidatorContract(id))
@@ -587,20 +551,15 @@ describe("MaticX sunset", function () {
 			const noncesBefore = await Promise.all(
 				shareAddrs.map((vs) => maticX.assetRecallNonces(vs))
 			);
-			// Sanity: at least one nonce must be non-zero (bulk-unstake ran).
+
 			expect(noncesBefore.some((n) => n > 0n)).to.equal(true);
 
-			// Without epoch advance: nonces are immature; the inner
-			// unstakeClaimTokens_newPOL reverts and the whole tx rolls back.
 			await (maticX.connect(manager) as MaticX)
 				.claimAssetRecallNonces()
 				.catch(() => {
-					// Expected — validator unbond is not matured yet.
+
 				});
 
-			// Rollback contract: every per-validator nonce is preserved,
-			// and the recallComplete flag must NOT have been set
-			// since the loop never completed.
 			const noncesAfter = await Promise.all(
 				shareAddrs.map((vs) => maticX.assetRecallNonces(vs))
 			);
@@ -623,7 +582,6 @@ describe("MaticX sunset", function () {
 			await (maticX.connect(manager) as MaticX).claimAssetRecallNonces();
 			expect(await maticX.recallComplete()).to.equal(true);
 
-			// Every per-validator nonce is cleared post-claim.
 			const validatorIds = await fx.validatorRegistry.getValidators();
 			for (const id of validatorIds) {
 				const vs = await stakeManager.getValidatorContract(id);
@@ -657,10 +615,7 @@ describe("MaticX sunset", function () {
 		});
 
 		it("reverts EmptyContract when totalSupply is zero at finalize", async function () {
-			// Run the recall flow through claim, then zero `totalSupply` via
-			// direct storage manipulation right before finalize. This is the
-			// only realistic way to exercise the defensive branch — the
-			// contract's own happy path always has supply > 0.
+
 			const fx = await loadFixture(deployFixture);
 			const {
 				maticX,
@@ -693,9 +648,7 @@ describe("MaticX sunset", function () {
 		});
 
 		it("reverts EmptyContract when polBalance is zero at finalize", async function () {
-			// Same gate, different branch of the `||`. Force the proxy's POL
-			// balance to 0 by writing to the POL token's balances mapping for
-			// this contract before finalize.
+
 			const fx = await loadFixture(deployFixture);
 			const {
 				maticX,
@@ -749,9 +702,7 @@ describe("MaticX sunset", function () {
 		});
 
 		it("emits the LIVE polBalance, not a snapshot from finalize", async function () {
-			// Regression guard for the `recalledPolBalance` removal: each push
-			// must reflect `polToken.balanceOf(this)` at call time. Two pushes
-			// separated by a balance change should emit different values.
+
 			const fx = await loadFixture(deployFixture);
 			const {
 				maticX,
@@ -774,8 +725,6 @@ describe("MaticX sunset", function () {
 				.to.emit(maticX, "TerminalRatePushedToL2")
 				.withArgs(supply, polAtFinalize);
 
-			// Donate POL to the proxy and push again; the event must reflect
-			// the new live balance.
 			const donation = ethers.parseUnits("7", 18);
 			await pol
 				.connect(polygonTreasury)
@@ -802,10 +751,6 @@ describe("MaticX sunset", function () {
 		});
 
 		it("reverts when disabling pre-freeze (gate is symmetric on terminalRateLocked)", async function () {
-			// Both enable and disable require `terminalRateLocked`. Disable-
-			// pre-freeze is unreachable in practice (enable requires lock, so
-			// the flag can never be true beforehand), but the symmetric gate
-			// keeps the state machine simple and tight.
 			const { maticX, manager } = await loadFixture(deployFixture);
 			await expect(
 				(maticX.connect(manager) as MaticX).setInstantRedeemEnabled(
@@ -859,8 +804,7 @@ describe("MaticX sunset", function () {
 		});
 
 		it("reverts on ERC20 burn underflow when caller holds no MATICx", async function () {
-			// _amount is now caller-supplied, so the natural failure mode for
-			// a caller with zero balance is ERC20Upgradeable._burn underflowing.
+
 			const fx = await loadFixture(deployFixture);
 			const { maticX, attacker } = fx;
 			await freezeAndEnable(fx);
@@ -875,12 +819,6 @@ describe("MaticX sunset", function () {
 			const { maticX, maticXAddress, stakerA } = fx;
 			await freezeAndEnable(fx);
 
-			// `finalizeTerminalRate` guarantees `terminalRate > 0` whenever
-			// `polBalance > 0` and `supply > 0`. Force it to 0 via storage so
-			// `_convertMaticXToPOL` falls through to the sentinel `rate = 1`
-			// branch. Then pass 1 wei MATICx so `(1 * 1) / 1e18` floors to
-			// zero and triggers the AmountInPolZero guard. Caller must still
-			// hold at least 1 wei for the eventual _burn (stakerA does).
 			const rateSlot = await findScalarStorageSlot(
 				maticXAddress,
 				await maticX.terminalRate(),
@@ -900,10 +838,6 @@ describe("MaticX sunset", function () {
 			const { maticX, maticXAddress, pol, stakerA } = fx;
 			await freezeAndEnable(fx);
 
-			// Normal accounting makes over-claim unreachable. Force the
-			// contract's live POL balance to zero after freeze to exercise
-			// the defensive guard (`polToken.balanceOf(address(this)) <
-			// amountInPol`).
 			const polAddr = await pol.getAddress();
 			const polBalanceSlot = await findMappingSlot(
 				polAddr,
@@ -1066,9 +1000,6 @@ describe("MaticX sunset", function () {
 			expect(await pol.balanceOf(maticXAddress)).to.equal(0);
 			expect(await pol.balanceOf(custody.address)).to.equal(polBefore);
 
-			// MATIC may legitimately be 0 in this fresh-proxy fixture — only
-			// attempt the second sweep if there's dust to move (the contract
-			// reverts ZeroAmount on an empty balance).
 			if (maticBefore > 0n) {
 				await expect(
 					(maticX.connect(manager) as MaticX).sweepToCustody(
@@ -1091,8 +1022,6 @@ describe("MaticX sunset", function () {
 			await pauseRecallAndFinalize(fx);
 			await time.increase(CUSTODY_DELAY + 1n);
 
-			// Fresh-proxy fixture has no MATIC balance; sweeping it must
-			// revert ZeroAmount (asset-was-empty footgun guard).
 			await expect(
 				(maticX.connect(manager) as MaticX).sweepToCustody(
 					await matic.getAddress(),
@@ -1138,9 +1067,7 @@ describe("MaticX sunset", function () {
 		});
 
 		it("succeeds at the exact sweepToCustodyTimestamp boundary (< vs <= check)", async function () {
-			// Contract uses `block.timestamp < sweepToCustodyTimestamp` so
-			// at exactly that timestamp the condition is false and sweep
-			// must succeed. Guards against off-by-one regressions.
+
 			const fx = await loadFixture(deployFixture);
 			const { maticX, manager, pol, custody } = fx;
 			await pauseRecallAndFinalize(fx);
@@ -1156,10 +1083,7 @@ describe("MaticX sunset", function () {
 		});
 
 		it("sweeps non-zero MATIC dust to custody", async function () {
-			// The fixture's MATIC balance on the proxy is 0; production may
-			// accumulate legacy MATIC dust from auto-claim rewards before
-			// the sunset commit point. Force a non-zero MATIC balance via
-			// the MATIC token's storage and confirm sweep moves it.
+
 			const fx = await loadFixture(deployFixture);
 			const { maticX, maticXAddress, manager, matic, custody } = fx;
 			await pauseRecallAndFinalize(fx);
@@ -1197,17 +1121,12 @@ describe("MaticX sunset", function () {
 		});
 
 		it("allows a second sweep of a different asset after assetCustodied flips", async function () {
-			// Regression guard: `assetCustodied = true` is a one-way kill-switch
-			// for the instant-redeem path, but it must NOT block subsequent
-			// sweeps of other assets — long-tail residue handover requires
-			// per-asset, sequential calls.
+
 			const fx = await loadFixture(deployFixture);
 			const { maticX, maticXAddress, manager, pol, matic, custody } = fx;
 			await pauseRecallAndFinalize(fx);
 			await time.increase(CUSTODY_DELAY + 1n);
 
-			// Force non-zero MATIC dust so the second sweep has something
-			// to move (fresh fixture has 0 MATIC).
 			const maticAddr = await matic.getAddress();
 			const dust = ethers.parseUnits("42", 18);
 			const balancesSlot = await findMappingSlot(
@@ -1226,7 +1145,6 @@ describe("MaticX sunset", function () {
 			const polAddr = await pol.getAddress();
 			const polBefore = await pol.balanceOf(maticXAddress);
 
-			// First sweep flips assetCustodied.
 			await (maticX.connect(manager) as MaticX).sweepToCustody(
 				polAddr,
 				custody.address
@@ -1234,7 +1152,6 @@ describe("MaticX sunset", function () {
 			expect(await maticX.assetCustodied()).to.equal(true);
 			expect(await pol.balanceOf(custody.address)).to.equal(polBefore);
 
-			// Second sweep of a different asset must still succeed.
 			await expect(
 				(maticX.connect(manager) as MaticX).sweepToCustody(
 					maticAddr,
@@ -1248,9 +1165,7 @@ describe("MaticX sunset", function () {
 		});
 
 		it("sweeps an arbitrary ERC20 (not POL/MATIC) to custody", async function () {
-			// Regression guard for the `fa2fbe5` generic-asset change: the
-			// function must work for ANY ERC20, not just POL/MATIC. Deploy a
-			// throwaway token, fund the proxy, sweep it.
+
 			const fx = await loadFixture(deployFixture);
 			const { maticX, maticXAddress, manager, custody } = fx;
 			await pauseRecallAndFinalize(fx);
@@ -1322,7 +1237,6 @@ describe("MaticX sunset", function () {
 				stakeManagerGovernance,
 			} = fx;
 
-			// stakerA requests withdrawal pre-sunset
 			await (maticX.connect(stakerA) as MaticX).requestWithdraw(
 				stakeAmount / 2n
 			);
@@ -1331,13 +1245,11 @@ describe("MaticX sunset", function () {
 			);
 			const { requestEpoch } = requests[0];
 
-			// Sunset proceeds
 			await (maticX.connect(manager) as MaticX).togglePause();
 			await (
 				maticX.connect(manager) as MaticX
 			).bulkUnstakeAllValidators();
 
-			// Advance epoch past user's request delay
 			const withdrawalDelay = await stakeManager.withdrawalDelay();
 			await stakeManager
 				.connect(stakeManagerGovernance)
@@ -1346,17 +1258,12 @@ describe("MaticX sunset", function () {
 			await (maticX.connect(manager) as MaticX).claimAssetRecallNonces();
 			await (maticX.connect(manager) as MaticX).finalizeTerminalRate();
 
-			// Snapshot the contract's live POL balance BEFORE user claim
 			const maticXAddress = await maticX.getAddress();
 			const recalledBefore = await pol.balanceOf(maticXAddress);
 			const polBeforeUser = await pol.balanceOf(stakerA.address);
 
-			// User claims their pre-sunset request — must succeed while paused
 			await (maticX.connect(stakerA) as MaticX).claimWithdrawal(0);
 
-			// User received POL; the contract's POL pool is unaffected — the
-			// pre-sunset claim path pulls from the stake manager's escrowed
-			// balance, not the contract's reserves.
 			expect(await pol.balanceOf(stakerA.address)).to.be.gt(
 				polBeforeUser
 			);
@@ -1390,8 +1297,6 @@ describe("MaticX sunset", function () {
 			const snap = await maticX.preFinalizeRate();
 			expect(snap).to.be.gt(0n);
 
-			// Read oracle while in recall window — must serve preFinalizeRate,
-			// not the legacy live rate (which would drift to 0 as stake leaves).
 			const [polOut] = await maticX.convertMaticXToPOL(
 				TERMINAL_RATE_PRECISION
 			);
@@ -1432,13 +1337,11 @@ describe("MaticX sunset", function () {
 	describe("Oracle three-tier behavior", function () {
 		it("pre-recall: serves the live computed rate from validator stakes", async function () {
 			const { maticX } = await loadFixture(deployFixture);
-			// Before any recall flag flips, the read path goes through
-			// totalSupply() / getTotalStakeAcrossAllValidators().
+
 			const supply = await maticX.totalSupply();
 			const [polFor1e18, returnedSupply, returnedPooled] =
 				await maticX.convertMaticXToPOL(TERMINAL_RATE_PRECISION);
-			// The 2nd/3rd return values mirror the legacy computation
-			// (totalShares / totalPooled), not TERMINAL_RATE_PRECISION.
+
 			expect(returnedSupply).to.equal(supply);
 			expect(returnedPooled).to.be.gt(0n);
 			expect(polFor1e18).to.be.gt(0n);
@@ -1447,8 +1350,6 @@ describe("MaticX sunset", function () {
 		it("during recall: preFinalizeRate matches the pre-recall live rate exactly", async function () {
 			const { maticX, manager } = await loadFixture(deployFixture);
 
-			// Capture the live rate one block before bulkUnstake, then
-			// confirm the snapshot equals it.
 			const [liveRateBefore] = await maticX.convertMaticXToPOL(
 				TERMINAL_RATE_PRECISION
 			);
@@ -1470,10 +1371,6 @@ describe("MaticX sunset", function () {
 			const terminal = await maticX.terminalRate();
 			expect(terminal).to.be.gt(0n);
 
-			// Tuple is (balanceInPOL, totalShares, totalPooled). Asking for
-			// PRECISION shares' worth of POL must equal the locked rate, and
-			// the implied rate (pooled * PRECISION / shares) must also equal
-			// the locked rate — donation-immune.
 			const [polFor1e18, totalShares, totalPooled] =
 				await maticX.convertMaticXToPOL(TERMINAL_RATE_PRECISION);
 			expect(polFor1e18).to.equal(terminal);
@@ -1486,7 +1383,6 @@ describe("MaticX sunset", function () {
 		it("convertPOLToMaticX mirrors the 3-tier oracle (during recall + post-finalize)", async function () {
 			const { maticX, manager } = await loadFixture(deployFixture);
 
-			// Pre-recall — live path, non-zero result.
 			const [livePre] = await maticX.convertPOLToMaticX(
 				TERMINAL_RATE_PRECISION
 			);
@@ -1497,9 +1393,6 @@ describe("MaticX sunset", function () {
 				maticX.connect(manager) as MaticX
 			).bulkUnstakeAllValidators();
 
-			// During recall — must be the inverse of preFinalizeRate. Tuple
-			// is (balanceInMaticX, totalShares, totalPooled); the implied
-			// rate (pooled * PRECISION / shares) must equal the snapshot.
 			const snap = await maticX.preFinalizeRate();
 			const [maticXOutDuringRecall, totalShares, totalPooled] =
 				await maticX.convertPOLToMaticX(TERMINAL_RATE_PRECISION);
@@ -1527,12 +1420,6 @@ describe("MaticX sunset", function () {
 			);
 			expect(oracleBefore).to.equal(snapBefore);
 
-			// Donor sends POL straight to the proxy. Under the legacy live
-			// computation this would have inflated the rate. The snapshot
-			// path must ignore the donation.
-			//
-			// stakerA was funded with stakeAmount*3 in the fixture and has
-			// stakeAmount*2 left after submitPOL. Donate stakeAmount (100 POL).
 			const donation = stakeAmount;
 			expect(await pol.balanceOf(stakerA.address)).to.be.gte(donation);
 			await pol
@@ -1571,9 +1458,7 @@ describe("MaticX sunset", function () {
 		});
 
 		it("during-recall sentinel: rate==1 when preFinalizeRate is 0", async function () {
-			// Force preFinalizeRate == 0 via storage manipulation post-bulkUnstake.
-			// Oracle must return rate = 1 (sentinel for "rate not snapshotable yet")
-			// instead of dividing by zero.
+
 			const fx = await loadFixture(deployFixture);
 			const { maticX, maticXAddress, manager } = fx;
 			await (maticX.connect(manager) as MaticX).togglePause();
@@ -1592,8 +1477,6 @@ describe("MaticX sunset", function () {
 			await setStorageAt(maticXAddress, slot, 0n);
 			expect(await maticX.preFinalizeRate()).to.equal(0n);
 
-			// Sentinel: with rate=1, asking PRECISION shares yields 1 unit,
-			// and the implied rate (pooled * PRECISION / shares) is 1.
 			const [polFor1e18, totalShares, totalPooled] =
 				await maticX.convertMaticXToPOL(TERMINAL_RATE_PRECISION);
 			expect(polFor1e18).to.equal(1n);
@@ -1604,8 +1487,7 @@ describe("MaticX sunset", function () {
 		});
 
 		it("post-finalize sentinel: rate==1 when terminalRate is 0", async function () {
-			// Defensive: if terminalRate were somehow 0 post-finalize, oracle
-			// must still return a safe `rate = 1` instead of dividing by zero.
+
 			const fx = await loadFixture(deployFixture);
 			const { maticX, maticXAddress } = fx;
 			await pauseRecallAndFinalize(fx);
@@ -1634,7 +1516,7 @@ describe("MaticX sunset", function () {
 	describe("setCustodyDelay (sweep window setter)", function () {
 		it("updates sweepToCustodyTimestamp = block.timestamp + _custodyDelay and emits the absolute value", async function () {
 			const { maticX, manager } = await loadFixture(deployFixture);
-			const newDelay = 7n * 24n * 60n * 60n; // 7 days
+			const newDelay = 7n * 24n * 60n * 60n;
 			const tx = await (
 				maticX.connect(manager) as MaticX
 			).setCustodyDelay(newDelay);
@@ -1665,11 +1547,7 @@ describe("MaticX sunset", function () {
 		});
 
 		it("sweepToCustody reverts when sweepToCustodyTimestamp is unset (footgun guard)", async function () {
-			// Models the production footgun: admin reaches finalize without
-			// ever calling setCustodyDelay (or storage corruption leaves it
-			// at 0). The finalize path no longer gates on this; the gate
-			// lives at sweep time. Force sweepToCustodyTimestamp to 0 via
-			// storage so we don't have to rebuild the fixture.
+
 			const fx = await loadFixture(deployFixture);
 			const { maticX, manager, pol, custody } = fx;
 			await pauseRecallAndFinalize(fx);
@@ -1692,22 +1570,18 @@ describe("MaticX sunset", function () {
 		});
 
 		it("sweepToCustody respects an admin-shortened delay (post-finalize reconfig)", async function () {
-			// Admin shrinks the delay post-finalize. setCustodyDelay
-			// recomputes sweepToCustodyTimestamp = now + shortDelay, so the
-			// new anchor is the moment of the reconfiguration. Sweep must
-			// wait the full shortDelay from that moment.
+
 			const fx = await loadFixture(deployFixture);
 			const { maticX, manager, pol, custody } = fx;
 			await pauseRecallAndFinalize(fx);
 
-			const shortDelay = 60n * 60n; // 1 hour
+			const shortDelay = 60n * 60n;
 			await (maticX.connect(manager) as MaticX).setCustodyDelay(
 				shortDelay
 			);
 			const sweepTs = await maticX.sweepToCustodyTimestamp();
 			const polAddr = await pol.getAddress();
 
-			// Below the new boundary -> revert.
 			await expect(
 				(maticX.connect(manager) as MaticX).sweepToCustody(
 					polAddr,
@@ -1715,7 +1589,6 @@ describe("MaticX sunset", function () {
 				)
 			).to.be.revertedWithCustomError(maticX, "CustodyDelayNotElapsed");
 
-			// At/after the new boundary -> success.
 			await time.increaseTo(sweepTs);
 			await expect(
 				(maticX.connect(manager) as MaticX).sweepToCustody(
@@ -1726,17 +1599,13 @@ describe("MaticX sunset", function () {
 		});
 
 		it("sweepToCustody respects an admin-extended delay (reconfig restarts the clock)", async function () {
-			// Admin extends delay AFTER the original 3-year window passes.
-			// Because setCustodyDelay computes `now + delay`, the new
-			// sweepToCustodyTimestamp is anchored to the reconfig moment
-			// — sweep must wait the full extendedDelay from that point.
+
 			const fx = await loadFixture(deployFixture);
 			const { maticX, manager, pol, custody } = fx;
 			await pauseRecallAndFinalize(fx);
 
 			const originalSweepTs = await maticX.sweepToCustodyTimestamp();
-			// Advance past the original 3-year window so the old gate would
-			// have opened.
+
 			await time.increaseTo(originalSweepTs + 100n);
 
 			const extendedDelay = 5n * 365n * 24n * 60n * 60n;
@@ -1744,7 +1613,6 @@ describe("MaticX sunset", function () {
 				extendedDelay
 			);
 
-			// New anchor: now + 5y; sweep should revert until that point.
 			const newSweepTs = await maticX.sweepToCustodyTimestamp();
 			expect(newSweepTs).to.be.gt(originalSweepTs);
 			const polAddr = await pol.getAddress();
@@ -1755,7 +1623,6 @@ describe("MaticX sunset", function () {
 				)
 			).to.be.revertedWithCustomError(maticX, "CustodyDelayNotElapsed");
 
-			// Advance to the new boundary exactly -> succeeds.
 			await time.increaseTo(newSweepTs);
 			await expect(
 				(maticX.connect(manager) as MaticX).sweepToCustody(
