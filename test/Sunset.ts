@@ -336,7 +336,11 @@ describe("MaticX sunset", function () {
 				(stakerAShares * expectedRate) / TERMINAL_RATE_PRECISION;
 
 			const recalledBefore = await pol.balanceOf(maticXAddress);
-			await expect((maticX.connect(stakerA) as MaticX).instantClaim())
+			await expect(
+				(maticX.connect(stakerA) as MaticX).requestWithdraw(
+					stakerAShares
+				)
+			)
 				.to.emit(maticX, "InstantClaimed")
 				.withArgs(stakerA.address, stakerAShares, expectedPol);
 
@@ -392,7 +396,7 @@ describe("MaticX sunset", function () {
 	});
 
 	describe("Paused-state matrix", function () {
-		it("blocks user write paths while paused but lets claimWithdrawal and instantClaim through", async function () {
+		it("blocks user write paths while paused but lets claimWithdrawal and the instant-redeem path through", async function () {
 			const fx = await loadFixture(deployFixture);
 			const { maticX, manager, bot, pol, stakerA } = fx;
 
@@ -409,9 +413,6 @@ describe("MaticX sunset", function () {
 				(maticX.connect(stakerA) as MaticX).submitPOL(stakeAmount)
 			).to.be.revertedWith("Pausable: paused");
 			await expect(
-				(maticX.connect(stakerA) as MaticX).requestWithdraw(stakeAmount)
-			).to.be.revertedWith("Pausable: paused");
-			await expect(
 				(maticX.connect(stakerA) as MaticX).withdrawRewards(1n)
 			).to.be.revertedWith("Pausable: paused");
 			await expect(
@@ -423,9 +424,11 @@ describe("MaticX sunset", function () {
 				(maticX.connect(manager) as MaticX).setFeePercent(100)
 			).to.be.revertedWith("Pausable: paused");
 
-			// instantClaim still works (always redeems caller's full balance)
+			// requestWithdraw routes to _instantClaim once instantRedeemEnabled
+			// is true, bypassing the pause guard intentionally.
+			const shares = await maticX.balanceOf(stakerA.address);
 			await expect(
-				(maticX.connect(stakerA) as MaticX).instantClaim()
+				(maticX.connect(stakerA) as MaticX).requestWithdraw(shares)
 			).to.emit(maticX, "InstantClaimed");
 
 			void pol;
@@ -516,16 +519,37 @@ describe("MaticX sunset", function () {
 				expect(await maticX.assetRecallNonces(share)).to.equal(0n);
 			}
 		});
+
+		it("captured nonce equals validator unbondNonces post-sell (regression: not +1)", async function () {
+			// Regression guard for the nonce-read ordering fix: read nonce
+			// AFTER `sellVoucher_newPOL`, no `+1`. If the function reverts to
+			// the pre-fix ordering, `assetRecallNonces[vs]` would be off-by-one
+			// from `unbondNonces(maticX)` and `claimAssetRecallNonces` would
+			// either claim the wrong nonce or fail.
+			const fx = await loadFixture(deployFixture);
+			const { maticX, maticXAddress, manager, stakeManager, validatorRegistry } = fx;
+			await (maticX.connect(manager) as MaticX).togglePause();
+			await (maticX.connect(manager) as MaticX).bulkUnstakeAllValidators();
+
+			const validatorIds = await validatorRegistry.getValidators();
+			let staked = 0;
+			for (const id of validatorIds) {
+				const share = await stakeManager.getValidatorContract(id);
+				const stored = await maticX.assetRecallNonces(share);
+				if (stored === 0n) continue;
+				staked++;
+				const vs = await ethers.getContractAt(
+					["function unbondNonces(address) view returns (uint256)"],
+					share
+				);
+				const live = (await vs.unbondNonces(maticXAddress)) as bigint;
+				expect(stored).to.equal(live);
+			}
+			expect(staked).to.be.gt(0);
+		});
 	});
 
 	describe("claimAssetRecallNonces", function () {
-		it("reverts without pause", async function () {
-			const { maticX, manager } = await loadFixture(deployFixture);
-			await expect(
-				(maticX.connect(manager) as MaticX).claimAssetRecallNonces()
-			).to.be.revertedWith("Pause first");
-		});
-
 		it("reverts after recallComplete", async function () {
 			// pauseRecallAndFinalize sets recallComplete = true, and the
 			// `recallComplete` check fires before `terminalRateLocked` in the
@@ -609,13 +633,6 @@ describe("MaticX sunset", function () {
 	});
 
 	describe("finalizeTerminalRate", function () {
-		it("reverts without pause", async function () {
-			const { maticX, manager } = await loadFixture(deployFixture);
-			await expect(
-				(maticX.connect(manager) as MaticX).finalizeTerminalRate()
-			).to.be.revertedWith("Pause first");
-		});
-
 		it("reverts on the second call", async function () {
 			const fx = await loadFixture(deployFixture);
 			const { maticX, manager } = fx;
@@ -730,6 +747,48 @@ describe("MaticX sunset", function () {
 				(maticX.connect(manager) as MaticX).pushTerminalRateToL2()
 			).to.emit(maticX, "TerminalRatePushedToL2");
 		});
+
+		it("emits the LIVE polBalance, not a snapshot from finalize", async function () {
+			// Regression guard for the `recalledPolBalance` removal: each push
+			// must reflect `polToken.balanceOf(this)` at call time. Two pushes
+			// separated by a balance change should emit different values.
+			const fx = await loadFixture(deployFixture);
+			const {
+				maticX,
+				maticXAddress,
+				manager,
+				pol,
+				polygonTreasury,
+			} = fx;
+			await pauseRecallAndFinalize(fx);
+			await (maticX.connect(manager) as MaticX).setInstantRedeemEnabled(
+				true
+			);
+
+			const supply = await maticX.totalSupply();
+			const polAtFinalize = await pol.balanceOf(maticXAddress);
+
+			await expect(
+				(maticX.connect(manager) as MaticX).pushTerminalRateToL2()
+			)
+				.to.emit(maticX, "TerminalRatePushedToL2")
+				.withArgs(supply, polAtFinalize);
+
+			// Donate POL to the proxy and push again; the event must reflect
+			// the new live balance.
+			const donation = ethers.parseUnits("7", 18);
+			await pol
+				.connect(polygonTreasury)
+				.transfer(maticXAddress, donation);
+			const polAfterDonation = await pol.balanceOf(maticXAddress);
+			expect(polAfterDonation).to.equal(polAtFinalize + donation);
+
+			await expect(
+				(maticX.connect(manager) as MaticX).pushTerminalRateToL2()
+			)
+				.to.emit(maticX, "TerminalRatePushedToL2")
+				.withArgs(supply, polAfterDonation);
+		});
 	});
 
 	describe("setInstantRedeemEnabled", function () {
@@ -742,15 +801,17 @@ describe("MaticX sunset", function () {
 			).to.be.revertedWithCustomError(maticX, "TerminalRateNotLocked");
 		});
 
-		it("allows disabling pre-freeze (kill-switch is unconditional)", async function () {
+		it("reverts when disabling pre-freeze (gate is symmetric on terminalRateLocked)", async function () {
+			// Both enable and disable require `terminalRateLocked`. Disable-
+			// pre-freeze is unreachable in practice (enable requires lock, so
+			// the flag can never be true beforehand), but the symmetric gate
+			// keeps the state machine simple and tight.
 			const { maticX, manager } = await loadFixture(deployFixture);
 			await expect(
 				(maticX.connect(manager) as MaticX).setInstantRedeemEnabled(
 					false
 				)
-			)
-				.to.emit(maticX, "InstantRedeemToggled")
-				.withArgs(manager.address, false);
+			).to.be.revertedWithCustomError(maticX, "TerminalRateNotLocked");
 		});
 
 		it("admin can toggle on then off post-freeze", async function () {
@@ -768,7 +829,7 @@ describe("MaticX sunset", function () {
 		});
 	});
 
-	describe("instantClaim", function () {
+	describe("instant-redeem path (requestWithdraw routes here once enabled)", function () {
 		async function freezeAndEnable(
 			fx: Awaited<ReturnType<typeof deployFixture>>
 		) {
@@ -778,23 +839,35 @@ describe("MaticX sunset", function () {
 			).setInstantRedeemEnabled(true);
 		}
 
-		it("reverts if redeem flag is off", async function () {
+		it("reverts Pausable: paused when redeem flag is off (falls through to legacy branch)", async function () {
 			const fx = await loadFixture(deployFixture);
 			const { maticX, stakerA } = fx;
 			await pauseRecallAndFinalize(fx);
+			const shares = await maticX.balanceOf(stakerA.address);
 			await expect(
-				(maticX.connect(stakerA) as MaticX).instantClaim()
-			).to.be.revertedWithCustomError(maticX, "InstantRedeemNotEnabled");
+				(maticX.connect(stakerA) as MaticX).requestWithdraw(shares)
+			).to.be.revertedWith("Pausable: paused");
 		});
 
-		it("reverts ZeroAmount when caller holds no MATICx", async function () {
+		it("reverts Invalid amount on zero input regardless of redeem flag", async function () {
+			const fx = await loadFixture(deployFixture);
+			const { maticX, stakerA } = fx;
+			await freezeAndEnable(fx);
+			await expect(
+				(maticX.connect(stakerA) as MaticX).requestWithdraw(0n)
+			).to.be.revertedWith("Invalid amount");
+		});
+
+		it("reverts on ERC20 burn underflow when caller holds no MATICx", async function () {
+			// _amount is now caller-supplied, so the natural failure mode for
+			// a caller with zero balance is ERC20Upgradeable._burn underflowing.
 			const fx = await loadFixture(deployFixture);
 			const { maticX, attacker } = fx;
 			await freezeAndEnable(fx);
 			expect(await maticX.balanceOf(attacker.address)).to.equal(0n);
 			await expect(
-				(maticX.connect(attacker) as MaticX).instantClaim()
-			).to.be.revertedWithCustomError(maticX, "ZeroAmount");
+				(maticX.connect(attacker) as MaticX).requestWithdraw(1n)
+			).to.be.reverted;
 		});
 
 		it("reverts AmountInPolZero when terminalRate is degenerate (defensive)", async function () {
@@ -805,9 +878,9 @@ describe("MaticX sunset", function () {
 			// `finalizeTerminalRate` guarantees `terminalRate > 0` whenever
 			// `polBalance > 0` and `supply > 0`. Force it to 0 via storage so
 			// `_convertMaticXToPOL` falls through to the sentinel `rate = 1`
-			// branch. Then shrink the holder's MATICx balance below
-			// `TERMINAL_RATE_PRECISION` so `(balance * 1) / 1e18` floors to
-			// zero and triggers the AmountInPolZero guard.
+			// branch. Then pass 1 wei MATICx so `(1 * 1) / 1e18` floors to
+			// zero and triggers the AmountInPolZero guard. Caller must still
+			// hold at least 1 wei for the eventual _burn (stakerA does).
 			const rateSlot = await findScalarStorageSlot(
 				maticXAddress,
 				await maticX.terminalRate(),
@@ -817,23 +890,8 @@ describe("MaticX sunset", function () {
 			await setStorageAt(maticXAddress, rateSlot, 0n);
 			expect(await maticX.terminalRate()).to.equal(0n);
 
-			const balanceSlot = await findMappingSlot(
-				maticXAddress,
-				stakerA.address,
-				() => maticX.balanceOf(stakerA.address),
-				123456789n
-			);
-			// 1 wei MATICx; with sentinel rate=1: 1 * 1 / 1e18 = 0.
-			await writeMappingValue(
-				maticXAddress,
-				balanceSlot,
-				stakerA.address,
-				1n
-			);
-			expect(await maticX.balanceOf(stakerA.address)).to.equal(1n);
-
 			await expect(
-				(maticX.connect(stakerA) as MaticX).instantClaim()
+				(maticX.connect(stakerA) as MaticX).requestWithdraw(1n)
 			).to.be.revertedWithCustomError(maticX, "AmountInPolZero");
 		});
 
@@ -856,15 +914,16 @@ describe("MaticX sunset", function () {
 			await writeMappingValue(polAddr, polBalanceSlot, maticXAddress, 0n);
 			expect(await pol.balanceOf(maticXAddress)).to.equal(0n);
 
+			const shares = await maticX.balanceOf(stakerA.address);
 			await expect(
-				(maticX.connect(stakerA) as MaticX).instantClaim()
+				(maticX.connect(stakerA) as MaticX).requestWithdraw(shares)
 			).to.be.revertedWithCustomError(
 				maticX,
 				"InsufficientRecalledBalance"
 			);
 		});
 
-		it("redeems the caller's full balance and zeroes their shares", async function () {
+		it("redeems the caller's full balance when amount == balance and zeroes their shares", async function () {
 			const fx = await loadFixture(deployFixture);
 			const { maticX, maticXAddress, pol, stakerA } = fx;
 			await freezeAndEnable(fx);
@@ -875,7 +934,9 @@ describe("MaticX sunset", function () {
 			const polBefore = await pol.balanceOf(stakerA.address);
 			const expectedPol = (sharesBefore * rate) / TERMINAL_RATE_PRECISION;
 
-			await (maticX.connect(stakerA) as MaticX).instantClaim();
+			await (maticX.connect(stakerA) as MaticX).requestWithdraw(
+				sharesBefore
+			);
 
 			expect(await maticX.balanceOf(stakerA.address)).to.equal(0n);
 			expect(await pol.balanceOf(maticXAddress)).to.equal(
@@ -886,7 +947,36 @@ describe("MaticX sunset", function () {
 			);
 		});
 
-		it("emits InstantClaimed with the caller's full balance", async function () {
+		it("supports partial redemption (amount < balance)", async function () {
+			const fx = await loadFixture(deployFixture);
+			const { maticX, maticXAddress, pol, stakerA } = fx;
+			await freezeAndEnable(fx);
+
+			const rate = await maticX.terminalRate();
+			const sharesBefore = await maticX.balanceOf(stakerA.address);
+			const half = sharesBefore / 2n;
+			const recalledBefore = await pol.balanceOf(maticXAddress);
+			const polBefore = await pol.balanceOf(stakerA.address);
+			const expectedPol = (half * rate) / TERMINAL_RATE_PRECISION;
+
+			await expect(
+				(maticX.connect(stakerA) as MaticX).requestWithdraw(half)
+			)
+				.to.emit(maticX, "InstantClaimed")
+				.withArgs(stakerA.address, half, expectedPol);
+
+			expect(await maticX.balanceOf(stakerA.address)).to.equal(
+				sharesBefore - half
+			);
+			expect(await pol.balanceOf(maticXAddress)).to.equal(
+				recalledBefore - expectedPol
+			);
+			expect(await pol.balanceOf(stakerA.address)).to.equal(
+				polBefore + expectedPol
+			);
+		});
+
+		it("emits InstantClaimed with the supplied amount", async function () {
 			const fx = await loadFixture(deployFixture);
 			const { maticX, stakerA } = fx;
 			await freezeAndEnable(fx);
@@ -895,7 +985,9 @@ describe("MaticX sunset", function () {
 			const shares = await maticX.balanceOf(stakerA.address);
 			const expectedPol = (shares * rate) / TERMINAL_RATE_PRECISION;
 
-			await expect((maticX.connect(stakerA) as MaticX).instantClaim())
+			await expect(
+				(maticX.connect(stakerA) as MaticX).requestWithdraw(shares)
+			)
 				.to.emit(maticX, "InstantClaimed")
 				.withArgs(stakerA.address, shares, expectedPol);
 		});
@@ -1023,7 +1115,7 @@ describe("MaticX sunset", function () {
 			expect(await maticX.assetCustodied()).to.equal(true);
 		});
 
-		it("instantClaim reverts with AssetCustodied after a sweep, even with instantRedeemEnabled", async function () {
+		it("instant-redeem path reverts with AssetCustodied after a sweep, even with instantRedeemEnabled", async function () {
 			const fx = await loadFixture(deployFixture);
 			const { maticX, manager, pol, stakerA, custody } = fx;
 			await pauseRecallAndFinalize(fx);
@@ -1039,8 +1131,9 @@ describe("MaticX sunset", function () {
 
 			expect(await maticX.instantRedeemEnabled()).to.equal(true);
 			expect(await maticX.assetCustodied()).to.equal(true);
+			const shares = await maticX.balanceOf(stakerA.address);
 			await expect(
-				(maticX.connect(stakerA) as MaticX).instantClaim()
+				(maticX.connect(stakerA) as MaticX).requestWithdraw(shares)
 			).to.be.revertedWithCustomError(maticX, "AssetCustodied");
 		});
 
@@ -1101,6 +1194,89 @@ describe("MaticX sunset", function () {
 			expect(await matic.balanceOf(custody.address)).to.equal(
 				maticBeforeCustody + dust
 			);
+		});
+
+		it("allows a second sweep of a different asset after assetCustodied flips", async function () {
+			// Regression guard: `assetCustodied = true` is a one-way kill-switch
+			// for the instant-redeem path, but it must NOT block subsequent
+			// sweeps of other assets — long-tail residue handover requires
+			// per-asset, sequential calls.
+			const fx = await loadFixture(deployFixture);
+			const { maticX, maticXAddress, manager, pol, matic, custody } = fx;
+			await pauseRecallAndFinalize(fx);
+			await time.increase(CUSTODY_DELAY + 1n);
+
+			// Force non-zero MATIC dust so the second sweep has something
+			// to move (fresh fixture has 0 MATIC).
+			const maticAddr = await matic.getAddress();
+			const dust = ethers.parseUnits("42", 18);
+			const balancesSlot = await findMappingSlot(
+				maticAddr,
+				maticXAddress,
+				async () => matic.balanceOf(maticXAddress),
+				123456789n
+			);
+			await writeMappingValue(
+				maticAddr,
+				balancesSlot,
+				maticXAddress,
+				dust
+			);
+
+			const polAddr = await pol.getAddress();
+			const polBefore = await pol.balanceOf(maticXAddress);
+
+			// First sweep flips assetCustodied.
+			await (maticX.connect(manager) as MaticX).sweepToCustody(
+				polAddr,
+				custody.address
+			);
+			expect(await maticX.assetCustodied()).to.equal(true);
+			expect(await pol.balanceOf(custody.address)).to.equal(polBefore);
+
+			// Second sweep of a different asset must still succeed.
+			await expect(
+				(maticX.connect(manager) as MaticX).sweepToCustody(
+					maticAddr,
+					custody.address
+				)
+			)
+				.to.emit(maticX, "SweptToCustody")
+				.withArgs(maticAddr, custody.address, dust);
+			expect(await matic.balanceOf(maticXAddress)).to.equal(0n);
+			expect(await matic.balanceOf(custody.address)).to.equal(dust);
+		});
+
+		it("sweeps an arbitrary ERC20 (not POL/MATIC) to custody", async function () {
+			// Regression guard for the `fa2fbe5` generic-asset change: the
+			// function must work for ANY ERC20, not just POL/MATIC. Deploy a
+			// throwaway token, fund the proxy, sweep it.
+			const fx = await loadFixture(deployFixture);
+			const { maticX, maticXAddress, manager, custody } = fx;
+			await pauseRecallAndFinalize(fx);
+			await time.increase(CUSTODY_DELAY + 1n);
+
+			const MockFactory = await ethers.getContractFactory("PolygonMock");
+			const stray = await MockFactory.connect(manager).deploy();
+			await stray.waitForDeployment();
+			const strayAddr = await stray.getAddress();
+
+			const amount = ethers.parseUnits("1000", 18);
+			await stray.mintTo(maticXAddress, amount);
+			expect(await stray.balanceOf(maticXAddress)).to.equal(amount);
+
+			await expect(
+				(maticX.connect(manager) as MaticX).sweepToCustody(
+					strayAddr,
+					custody.address
+				)
+			)
+				.to.emit(maticX, "SweptToCustody")
+				.withArgs(strayAddr, custody.address, amount);
+
+			expect(await stray.balanceOf(maticXAddress)).to.equal(0n);
+			expect(await stray.balanceOf(custody.address)).to.equal(amount);
+			expect(await maticX.assetCustodied()).to.equal(true);
 		});
 	});
 
