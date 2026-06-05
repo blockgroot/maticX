@@ -15,8 +15,11 @@ import { HardhatRuntimeEnvironment } from "hardhat/types";
  *
  * Steps for encode-step: pause | bulk-unstake | claim-recall | freeze |
  *                        push-l2 | enable-instant-redeem | disable-instant-redeem |
- *                        sweep
+ *                        set-custody-delay | sweep
  */
+
+// 2 years (730 days) — sweep window before residual assets can be moved to custody
+const CUSTODY_DELAY_SECONDS = 730n * 24n * 60n * 60n;
 
 const TIMELOCK_SALT_TEXT = "MATICX_SUNSET_V2_UPGRADE";
 const PROXY_ADMIN_ABI = [
@@ -327,6 +330,8 @@ const STEP_ENCODERS: Record<
 		encodeMaticX("setInstantRedeemEnabled", [true]),
 	"disable-instant-redeem": async () =>
 		encodeMaticX("setInstantRedeemEnabled", [false]),
+	"set-custody-delay": async () =>
+		encodeMaticX("setCustodyDelay", [CUSTODY_DELAY_SECONDS]),
 	sweep: async (hre, _dep, arg) => {
 		// `--arg "<asset>,<custody>"` — comma-separated addresses since
 		// the framework only supports a single string.
@@ -352,6 +357,7 @@ function encodeMaticX(fn: string, args: unknown[]): string {
 		"function finalizeTerminalRate() external",
 		"function pushTerminalRateToL2() external",
 		"function setInstantRedeemEnabled(bool _enabled) external",
+		"function setCustodyDelay(uint256 _custodyDelay) external",
 		"function sweepToCustody(address _asset, address _custody) external",
 	]);
 	return iface.encodeFunctionData(fn, args);
