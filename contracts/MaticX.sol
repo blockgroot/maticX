@@ -263,8 +263,8 @@ contract MaticX is
 		return amountToMint;
 	}
 
-	/// @notice Registers a user's request to withdraw an amount of POL tokens.
-	/// @param _amount - Amount of POL tokens
+	/// @notice Registers a user's request to withdraw by burning MaticX shares.
+	/// @param _amount - Amount of MaticX shares to burn
 	// slither-disable-next-line reentrancy-no-eth
 	function requestWithdraw(
 		uint256 _amount
