@@ -180,12 +180,15 @@ task("sunset:verify-upgrade")
 			dep.eth_maticX_proxy
 		);
 		const expectedImpl = dep.eth_maticX_sunset_impl;
+		if (!expectedImpl) {
+			throw new Error(
+				"eth_maticX_sunset_impl missing from deployment-info — " +
+					"cannot verify upgrade target. Run sunset:deploy-impl first."
+			);
+		}
 		console.log("Live impl:    ", liveImpl);
 		console.log("Expected impl:", expectedImpl);
-		if (
-			expectedImpl &&
-			liveImpl.toLowerCase() !== expectedImpl.toLowerCase()
-		) {
+		if (liveImpl.toLowerCase() !== expectedImpl.toLowerCase()) {
 			throw new Error(
 				"Live implementation does not match expected impl."
 			);
